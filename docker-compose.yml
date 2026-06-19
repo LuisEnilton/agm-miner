@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:latest
+    container_name: grimoire_opensearch
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g # Limita a RAM a 1GB para evitar travamentos na sua máquina
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data # Garante que os dados fiquem salvos!
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:latest
+    container_name: grimoire_dashboards
+    environment:
+      - OPENSEARCH_HOSTS=http://opensearch:9200 # Usa o nome do container vizinho na rede interna
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      - "5601:5601"
+    depends_on:
+      - opensearch
+
+volumes:
+  opensearch-data:
+    name: grimoire_db_data

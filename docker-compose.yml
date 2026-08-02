@@ -1,30 +1,22 @@
 version: '3.8'
 
 services:
-  opensearch:
-    image: opensearchproject/opensearch:latest
-    container_name: grimoire_opensearch
+  db:
+    image: postgres:15-alpine
+    container_name: msr_research_db
     environment:
-      - discovery.type=single-node
-      - DISABLE_SECURITY_PLUGIN=true
-      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g # Limita a RAM a 1GB para evitar travamentos na sua máquina
+      POSTGRES_USER: research_user
+      POSTGRES_PASSWORD: research_password
+      POSTGRES_DB: agent_artifacts_research
     ports:
-      - "9200:9200"
-      - "9600:9600"
+      - "5432:5432"
     volumes:
-      - opensearch-data:/usr/share/opensearch/data # Garante que os dados fiquem salvos!
-
-  opensearch-dashboards:
-    image: opensearchproject/opensearch-dashboards:latest
-    container_name: grimoire_dashboards
-    environment:
-      - OPENSEARCH_HOSTS=http://opensearch:9200 # Usa o nome do container vizinho na rede interna
-      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
-    ports:
-      - "5601:5601"
-    depends_on:
-      - opensearch
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U research_user -d agent_artifacts_research"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
 volumes:
-  opensearch-data:
-    name: grimoire_db_data
+  pgdata:

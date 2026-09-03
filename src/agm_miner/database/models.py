@@ -34,7 +34,7 @@ class AuthorType(str, enum.Enum):
     DOC_ONLY = "DOC_ONLY"
     UNKNOWN = "UNKNOWN"
 
-
+# Considerar Criar estado REJECTED para repositorios que não atendem aos critérios de qualidade do AGM Miner.
 class RepositoryStatus(str, enum.Enum):
     PENDING = "PENDING"
     COMPLETED = "COMPLETED"

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -487,8 +488,22 @@ def build_repo_features(
 
 
 def build_datasets(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> dict[str, int]:
+    """Write every dataset to ``output_dir``, replacing it only once all files are complete."""
+    staging = output_dir.with_name(output_dir.name + ".partial")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        counts = _build_into(bronze_dir, staging, config)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(output_dir, ignore_errors=True)
+    staging.rename(output_dir)
+    return counts
+
+
+def _build_into(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> dict[str, int]:
     tables = load_bronze(bronze_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     metrics, sections, documents = build_version_tables(tables, config)
     roles = build_author_roles(tables, config)
     structure = build_rq2_structure(tables, metrics)

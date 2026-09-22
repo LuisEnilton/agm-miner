@@ -6,6 +6,8 @@
   hundreds of thousands of commits never need to fit in memory at once.
 * Input for ``--stdin`` commands is written from a separate thread to avoid pipe deadlocks.
 * Every command has a wall-clock timeout enforced by a watchdog.
+* Commands run in their own session, so a Ctrl+C in the terminal does not kill them halfway;
+  :func:`terminate_active_processes` stops them on purpose when a run is aborted.
 """
 
 from __future__ import annotations
@@ -22,6 +24,28 @@ from typing import IO
 logger = logging.getLogger(__name__)
 
 _READ_CHUNK = 1 << 20
+
+_active_processes: set[subprocess.Popen[bytes]] = set()
+_active_lock = threading.Lock()
+
+
+def _spawn(command: list[str], **kwargs) -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(command, env=git_environment(), start_new_session=True, **kwargs)
+    with _active_lock:
+        for finished in [p for p in _active_processes if p.poll() is not None]:
+            _active_processes.discard(finished)
+        _active_processes.add(process)
+    return process
+
+
+def terminate_active_processes() -> int:
+    """Kill every git process still running (used when a run is aborted); returns how many."""
+    with _active_lock:
+        running = [process for process in _active_processes if process.poll() is None]
+        _active_processes.clear()
+    for process in running:
+        process.kill()
+    return len(running)
 
 
 class GitError(RuntimeError):
@@ -80,20 +104,21 @@ class GitRunner:
 
     def run(self, args: list[str], stdin: bytes | None = None) -> bytes:
         """Run a command and return its whole stdout (for small outputs)."""
+        process = _spawn(
+            self._command(args),
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         try:
-            completed = subprocess.run(
-                self._command(args),
-                input=stdin,
-                capture_output=True,
-                env=git_environment(),
-                timeout=self.timeout_seconds,
-                check=False,
-            )
+            stdout, stderr = process.communicate(input=stdin, timeout=self.timeout_seconds)
         except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.communicate()
             raise GitTimeoutError(args, -1, f"timed out after {self.timeout_seconds}s") from exc
-        if completed.returncode != 0:
-            raise GitError(args, completed.returncode, completed.stderr.decode("utf-8", "replace"))
-        return completed.stdout
+        if process.returncode != 0:
+            raise GitError(args, process.returncode, stderr.decode("utf-8", "replace"))
+        return stdout
 
     def stream_tokens(
         self, args: list[str], stdin_lines: Iterable[str] | None = None
@@ -114,12 +139,11 @@ class GitRunner:
 
     def open_interactive(self, args: list[str]) -> subprocess.Popen[bytes]:
         """Start a request/response command such as ``cat-file --batch``."""
-        return subprocess.Popen(
+        return _spawn(
             self._command(args),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env=git_environment(),
         )
 
 
@@ -138,12 +162,11 @@ class _ManagedProcess:
         self._timeout_seconds = timeout_seconds
         self._timed_out = threading.Event()
         self._stderr_chunks: list[bytes] = []
-        self.process = subprocess.Popen(
+        self.process = _spawn(
             command,
             stdin=subprocess.PIPE if stdin_lines is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=git_environment(),
         )
         self._threads: list[threading.Thread] = []
 

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from agm_miner.config import SelectionConfig, StudyConfig
 from agm_miner.database.models import DiscoveryHit, Repository, RepositoryStatus, RunStage
 from agm_miner.github.client import GitHubClient
-from agm_miner.runs import RunContext, track_run
+from agm_miner.runs import RunContext, exclusive_stage, track_run
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +215,10 @@ def select_repositories(
         ]
     reference = reference_date(study.selection)
     params = {"reevaluate": reevaluate, "limit": limit, "reference_date": reference.isoformat()}
-    with track_run(session_factory, RunStage.SELECT, study, params) as run:
+    with (
+        exclusive_stage(session_factory, RunStage.SELECT),
+        track_run(session_factory, RunStage.SELECT, study, params) as run,
+    ):
         with session_factory() as session:
             query = (
                 select(Repository.id, Repository.node_id, Repository.status)
@@ -313,9 +316,11 @@ def add_repositories(
     them apart from the search-based sample.
     """
     reference = reference_date(study.selection)
-    with track_run(
-        session_factory, RunStage.SELECT, study, {"add_repositories": list(full_names)}
-    ) as run:
+    params = {"add_repositories": list(full_names)}
+    with (
+        exclusive_stage(session_factory, RunStage.SELECT),
+        track_run(session_factory, RunStage.SELECT, study, params) as run,
+    ):
         for full_name in full_names:
             owner, _, name = full_name.partition("/")
             if not owner or not name:

@@ -49,3 +49,15 @@ def test_export_then_analyze(session_factory, tmp_path: Path) -> None:
     runs = json.loads(runner.invoke(app, ["runs", "list"]).output)
     assert [run["stage"] for run in runs] == ["EXPORT"]
     assert runs[0]["status"] == "SUCCEEDED"
+
+
+def test_interrupt_exits_130_with_resume_hint(session_factory, monkeypatch) -> None:
+    from agm_miner.stages import discovery
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(discovery, "discover_repositories", interrupted)
+    result = runner.invoke(app, ["discover"])
+    assert result.exit_code == 130
+    assert "run the same command again" in result.output

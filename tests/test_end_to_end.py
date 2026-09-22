@@ -127,7 +127,8 @@ def test_bronze_export_contains_every_table_with_typed_columns(bronze: Path) -> 
 def test_empty_table_export_keeps_schema(session_factory, tmp_path: Path) -> None:
     table = Base.metadata.tables["commit_coauthors"]
     destination = tmp_path / "coauthors.parquet"
-    assert export_table(session_factory.kw["bind"], table, destination) == 0
+    with session_factory.kw["bind"].connect() as connection:
+        assert export_table(connection, table, destination) == 0
     frame = pl.read_parquet(destination)
     assert frame.height == 0
     assert frame.schema == table_schema(table)
@@ -177,3 +178,52 @@ def test_gold_datasets(bronze: Path, tmp_path: Path) -> None:
     manifest = json.loads((output / "analysis_manifest.json").read_text())
     assert manifest["bronze_manifest"]["schema_revision"] == alembic_head()
     assert manifest["outputs"]["rq3_changes"] == counts["rq3_changes"]
+
+
+def test_interrupted_export_leaves_no_dataset(session_factory, tmp_path: Path, monkeypatch) -> None:
+    from agm_miner.stages import export as export_module
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(export_module, "export_table", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        export_bronze(StudyConfig(), session_factory, tmp_path / "bronze")
+    assert list((tmp_path / "bronze").iterdir()) == []
+    with pytest.raises(FileNotFoundError):
+        latest_export(tmp_path / "bronze")
+
+
+def test_export_reads_one_consistent_snapshot(session_factory, tmp_path: Path, monkeypatch) -> None:
+    from agm_miner.stages import export as export_module
+
+    seen = []
+    original = export_module.export_table
+
+    def spy(connection, table, destination):
+        seen.append((id(connection), connection.get_isolation_level(), connection.in_transaction()))
+        return original(connection, table, destination)
+
+    monkeypatch.setattr(export_module, "export_table", spy)
+    export_bronze(StudyConfig(), session_factory, tmp_path / "bronze")
+    assert len({connection_id for connection_id, _, _ in seen}) == 1
+    assert {(level, active) for _, level, active in seen} == {("REPEATABLE READ", True)}
+
+
+def test_interrupted_analysis_keeps_previous_output(
+    bronze: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from agm_miner.analysis import datasets
+
+    output = tmp_path / "gold"
+    build_datasets(bronze, output, AnalysisConfig())
+    before = sorted(path.name for path in output.iterdir())
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(datasets, "build_repo_features", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        build_datasets(bronze, output, AnalysisConfig())
+    assert sorted(path.name for path in output.iterdir()) == before
+    assert not (tmp_path / "gold.partial").exists()

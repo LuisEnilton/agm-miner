@@ -9,14 +9,20 @@ Guarantees:
 * **Concurrency-safe**: each repository is guarded by a PostgreSQL advisory lock, so several
   workers or processes never mine the same repository at once.
 * **Failures are recorded** (``FAILED`` + ``last_error`` + ``attempts``) and can be retried.
+* **Interruptible**: the first Ctrl+C/SIGTERM stops scheduling new repositories and lets the
+  in-progress ones finish; a second one aborts them. Aborted or never-started repositories keep
+  their previous status, so the next run simply continues.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+import signal
+import threading
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -41,7 +47,8 @@ from agm_miner.database.models import (
 )
 from agm_miner.extraction import Extraction, extract_repository
 from agm_miner.git.repository import GitRepository, ensure_git_version, remote_head
-from agm_miner.runs import track_run
+from agm_miner.git.runner import terminate_active_processes
+from agm_miner.runs import RunContext, track_run
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +65,27 @@ class MiningOutcome(StrEnum):
     FAILED = "failed"
     LOCKED = "locked"
     SKIPPED = "skipped"
+    INTERRUPTED = "interrupted"  # aborted while in progress; status left untouched
+    NOT_STARTED = "not_started"  # cancelled before it started
+
+
+@dataclass(slots=True)
+class Cancellation:
+    """Shared stop flags: ``stopping`` = start nothing new, ``aborting`` = stop in-progress work."""
+
+    stopping: threading.Event = field(default_factory=threading.Event)
+    aborting: threading.Event = field(default_factory=threading.Event)
+
+    def request(self) -> None:
+        """Escalate one step (called on each Ctrl+C / SIGTERM)."""
+        if not self.stopping.is_set():
+            self.stopping.set()
+            logger.warning("Stopping: no new repositories will start (Ctrl+C again to abort)")
+            return
+        if not self.aborting.is_set():
+            self.aborting.set()
+            killed = terminate_active_processes()
+            logger.warning("Aborting in-progress repositories (%s git processes killed)", killed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +118,10 @@ def mine_repositories(
     session_factory: sessionmaker[Session],
     options: MiningOptions,
     clone_url: Callable[[str], str] = github_clone_url,
+    cancellation: Cancellation | None = None,
 ) -> dict[str, int]:
+    """Mine the candidate repositories; raises KeyboardInterrupt after a requested stop."""
+    cancellation = cancellation or Cancellation()
     params = {
         "repo_names": list(options.repo_names),
         "limit": options.limit,
@@ -106,12 +137,61 @@ def mine_repositories(
         logger.info("Mining %s repositories with %s worker(s)", len(candidates), options.workers)
 
         def work(repo_id: int) -> MiningOutcome:
-            return _mine_one(settings, study, session_factory, options, clone_url, repo_id, run.id)
+            return _mine_one(
+                settings, study, session_factory, options, clone_url, repo_id, run.id, cancellation
+            )
 
-        with ThreadPoolExecutor(max_workers=max(1, options.workers)) as pool:
-            for outcome in pool.map(work, candidates):
-                run.increment(outcome.value)
+        pool = ThreadPoolExecutor(max_workers=max(1, options.workers))
+        try:
+            with _signals_escalate(cancellation):
+                futures = [pool.submit(work, repo_id) for repo_id in candidates]
+                _drain(futures, run, cancellation)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+        if cancellation.stopping.is_set():
+            raise KeyboardInterrupt
         return dict(run.stats)
+
+
+@contextmanager
+def _signals_escalate(cancellation: Cancellation) -> Iterator[None]:
+    """While mining, Ctrl+C/SIGTERM only escalate ``cancellation``.
+
+    A KeyboardInterrupt can be raised at any bytecode, even inside the code handling the
+    previous one, so the signals are turned into flags that the main loop checks instead.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(signum, frame) -> None:
+        cancellation.request()
+
+    previous = {sig: signal.signal(sig, handler) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        yield
+    finally:
+        for sig, old in previous.items():
+            signal.signal(sig, old)
+
+
+def _drain(
+    futures: list[Future[MiningOutcome]],
+    run: RunContext,
+    cancellation: Cancellation,
+) -> None:
+    """Collect outcomes; once a stop is requested, repositories that did not start are cancelled."""
+    pending: set[Future[MiningOutcome]] = set(futures)
+    while pending:
+        done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+        if cancellation.stopping.is_set():
+            for future in pending:
+                future.cancel()
+        for future in done:
+            if future.cancelled():
+                run.increment(MiningOutcome.NOT_STARTED.value)
+            else:
+                run.increment(future.result().value)
 
 
 def _candidates(session_factory: sessionmaker[Session], options: MiningOptions) -> list[int]:
@@ -148,7 +228,10 @@ def _mine_one(
     clone_url: Callable[[str], str],
     repo_id: int,
     run_id: int,
+    cancellation: Cancellation,
 ) -> MiningOutcome:
+    if cancellation.stopping.is_set():
+        return MiningOutcome.NOT_STARTED
     engine = session_factory.kw["bind"]
     with engine.connect() as lock_connection:
         acquired = lock_connection.execute(select(func.pg_try_advisory_lock(repo_id))).scalar()
@@ -158,7 +241,7 @@ def _mine_one(
             return MiningOutcome.LOCKED
         try:
             return _mine_locked(
-                settings, study, session_factory, options, clone_url, repo_id, run_id
+                settings, study, session_factory, options, clone_url, repo_id, run_id, cancellation
             )
         finally:
             lock_connection.execute(select(func.pg_advisory_unlock(repo_id)))
@@ -173,6 +256,7 @@ def _mine_locked(
     clone_url: Callable[[str], str],
     repo_id: int,
     run_id: int,
+    cancellation: Cancellation,
 ) -> MiningOutcome:
     with session_factory() as session:
         repository = session.get(Repository, repo_id)
@@ -195,9 +279,13 @@ def _mine_locked(
                 logger.info("%s unchanged since last mining (%s)", full_name, mined_head[:12])
                 return MiningOutcome.UNCHANGED
 
+        if cancellation.aborting.is_set():
+            return MiningOutcome.INTERRUPTED
         logger.info("Cloning %s", full_name)
         clone = GitRepository.clone(url, clone_path, settings.git_timeout_seconds)
         extraction = extract_repository(clone, study.mining)
+        if cancellation.aborting.is_set():
+            return MiningOutcome.INTERRUPTED
         with session_factory() as session, session.begin():
             persist_extraction(session, repo_id, extraction)
             session.execute(
@@ -222,6 +310,10 @@ def _mine_locked(
         )
         return MiningOutcome.MINED
     except Exception as exc:
+        if cancellation.aborting.is_set():
+            # The error is the abort itself (killed git processes), not a property of the repo.
+            logger.info("Aborted %s; its status is unchanged", full_name)
+            return MiningOutcome.INTERRUPTED
         logger.exception("Failed to mine %s", full_name)
         with session_factory() as session, session.begin():
             session.execute(

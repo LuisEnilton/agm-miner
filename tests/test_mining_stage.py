@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -23,7 +25,13 @@ from agm_miner.database.models import (
     RepositoryStatus,
     RunStatus,
 )
-from agm_miner.stages.mining import MiningOptions, RepositoryLookupError, mine_repositories
+from agm_miner.git.runner import GitError
+from agm_miner.stages.mining import (
+    Cancellation,
+    MiningOptions,
+    RepositoryLookupError,
+    mine_repositories,
+)
 from tests.gitrepo import RepoBuilder
 
 pytestmark = [pytest.mark.db, pytest.mark.git]
@@ -196,3 +204,114 @@ def test_ambiguous_explicit_name_fails_the_run(settings, session_factory, origin
         session.add(Repository(id=43, node_id="R_43", full_name="acme/widget"))
     with pytest.raises(RepositoryLookupError, match="select --reevaluate"):
         mine(settings, session_factory, origin, repo_names=["acme/widget"])
+
+
+def add_repositories(session_factory: sessionmaker[Session], *repo_ids: int) -> None:
+    with session_factory() as session, session.begin():
+        for repo_id in repo_ids:
+            session.add(
+                Repository(
+                    id=repo_id,
+                    node_id=f"R_{repo_id}",
+                    full_name=f"acme/repo{repo_id}",
+                    status=RepositoryStatus.SELECTED,
+                )
+            )
+
+
+def ctrl_c() -> None:
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def test_first_interrupt_finishes_current_repository(settings, session_factory, origin) -> None:
+    add_repositories(session_factory, 1, 2, 3)
+    cancellation = Cancellation()
+
+    def clone_url(full_name: str) -> str:
+        if full_name == "acme/repo1":
+            ctrl_c()
+            assert cancellation.stopping.wait(5)
+        return origin.url
+
+    with pytest.raises(KeyboardInterrupt):
+        mine_repositories(
+            settings,
+            StudyConfig(),
+            session_factory,
+            MiningOptions(workers=1),
+            clone_url=clone_url,
+            cancellation=cancellation,
+        )
+    with session_factory() as session:
+        # The repository in progress was completed and saved; the others did not start.
+        assert session.get(Repository, 1).status is RepositoryStatus.MINED
+        for repo_id in (2, 3):
+            repository = session.get(Repository, repo_id)
+            assert repository.status is RepositoryStatus.SELECTED and repository.attempts == 0
+        run = session.scalars(select(PipelineRun)).one()
+        assert run.status is RunStatus.INTERRUPTED
+        assert run.stats == {"candidates": 3, "mined": 1, "not_started": 2}
+
+    # Running the same command again continues with what is left.
+    assert mine(settings, session_factory, origin) == {"candidates": 2, "mined": 2}
+
+
+def test_second_interrupt_aborts_without_marking_failures(
+    settings, session_factory, origin
+) -> None:
+    add_repositories(session_factory, 1, 2)
+    cancellation = Cancellation()
+
+    def clone_url(full_name: str) -> str:
+        ctrl_c()
+        assert cancellation.stopping.wait(5)
+        ctrl_c()
+        assert cancellation.aborting.wait(5)
+        return origin.url
+
+    with pytest.raises(KeyboardInterrupt):
+        mine_repositories(
+            settings,
+            StudyConfig(),
+            session_factory,
+            MiningOptions(workers=1),
+            clone_url=clone_url,
+            cancellation=cancellation,
+        )
+    with session_factory() as session:
+        for repo_id in (1, 2):
+            repository = session.get(Repository, repo_id)
+            assert repository.status is RepositoryStatus.SELECTED
+            assert repository.attempts == 0 and repository.last_error is None
+        stats = session.scalars(select(PipelineRun)).one().stats
+        assert stats == {"candidates": 2, "interrupted": 1, "not_started": 1}
+
+
+def test_errors_caused_by_an_abort_are_not_failures(
+    settings, session_factory, origin, monkeypatch
+) -> None:
+    """Git processes killed by the abort make extraction fail; that is not a repository failure."""
+    from agm_miner.stages import mining as mining_module
+
+    add_repositories(session_factory, 1)
+    cancellation = Cancellation()
+
+    def killed_mid_extraction(clone, config):
+        cancellation.stopping.set()
+        cancellation.aborting.set()
+        raise GitError(["log"], -9, "killed")
+
+    monkeypatch.setattr(mining_module, "extract_repository", killed_mid_extraction)
+    with pytest.raises(KeyboardInterrupt):
+        mine_repositories(
+            settings,
+            StudyConfig(),
+            session_factory,
+            MiningOptions(workers=1),
+            clone_url=lambda _: origin.url,
+            cancellation=cancellation,
+        )
+    with session_factory() as session:
+        repository = session.get(Repository, 1)
+        assert repository.status is RepositoryStatus.SELECTED
+        assert repository.last_error is None and repository.attempts == 0

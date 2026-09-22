@@ -4,6 +4,9 @@ The Search API returns at most 1000 results per query. Queries without an explic
 qualifier are therefore split by bisecting the file-size range until every slice fits under the
 cap. Every hit is recorded in ``discovery_hits`` (query + path) as sampling provenance.
 
+Progress is stored per size slice in ``discovery_slices`` (SPLIT or COLLECTED), so an interrupted
+discovery resumes without repeating finished slices; ``--restart`` forgets that progress.
+
 Known limitations (report them as threats to validity): code search only indexes default
 branches and files smaller than 384 KB, and its results are not guaranteed to be deterministic.
 """
@@ -15,14 +18,21 @@ import math
 import re
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from agm_miner.config import DiscoveryConfig, StudyConfig
-from agm_miner.database.models import DiscoveryHit, Repository, RepositoryStatus, RunStage
-from agm_miner.github.client import CodeSearchHit, GitHubClient
-from agm_miner.runs import RunContext, track_run
+from agm_miner.database.models import (
+    DiscoveryHit,
+    DiscoverySlice,
+    Repository,
+    RepositoryStatus,
+    RunStage,
+    SliceOutcome,
+)
+from agm_miner.github.client import CodeSearchHit, CodeSearchPage, GitHubClient
+from agm_miner.runs import RunContext, exclusive_stage, track_run
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +44,21 @@ def discover_repositories(
     session_factory: sessionmaker[Session],
     client: GitHubClient,
     queries: Sequence[str] | None = None,
+    *,
+    restart: bool = False,
 ) -> dict[str, int]:
+    """Search every query, resuming from ``discovery_slices`` unless ``restart`` is set.
+
+    Only one discovery may run per database at a time (they would share one token's quota).
+    """
     selected_queries = list(queries or study.discovery.queries)
-    with track_run(session_factory, RunStage.DISCOVER, study, {"queries": selected_queries}) as run:
+    params = {"queries": selected_queries, "restart": restart}
+    with (
+        exclusive_stage(session_factory, RunStage.DISCOVER),
+        track_run(session_factory, RunStage.DISCOVER, study, params) as run,
+    ):
+        if restart:
+            _forget_progress(session_factory, selected_queries)
         for query in selected_queries:
             _discover_query(query, study.discovery, session_factory, client, run)
         return dict(run.stats)
@@ -53,6 +75,9 @@ def _discover_query(
     run.increment("queries")
     if _SIZE_QUALIFIER_RE.search(query):
         logger.warning("Query %r already has a size qualifier; size bisection disabled", query)
+        if _progress(session_factory, query) is SliceOutcome.COLLECTED:
+            run.increment("resumed_slices")
+            return
         _collect(query, query, config, session_factory, client, run)
         return
     _bisect(query, config.size_min, config.size_max, config, session_factory, client, run)
@@ -68,12 +93,23 @@ def _bisect(
     run: RunContext,
 ) -> None:
     sliced = f"{base_query} size:{low}..{high}"
+    done = _progress(session_factory, sliced)
+    if done is SliceOutcome.COLLECTED:
+        run.increment("resumed_slices")
+        return
+    if done is SliceOutcome.SPLIT:
+        middle = (low + high) // 2
+        _bisect(base_query, low, middle, config, session_factory, client, run)
+        _bisect(base_query, middle + 1, high, config, session_factory, client, run)
+        return
+
     first = client.search_code(sliced, page=1, per_page=config.page_size)
     run.increment("api_requests")
     if first.total_count >= config.max_results_per_query and low < high:
         middle = (low + high) // 2
         logger.info("Splitting %s (%s matches)", sliced, first.total_count)
         run.increment("splits")
+        _record(session_factory, sliced, base_query, SliceOutcome.SPLIT, first.total_count, run)
         _bisect(base_query, low, middle, config, session_factory, client, run)
         _bisect(base_query, middle + 1, high, config, session_factory, client, run)
         return
@@ -87,7 +123,7 @@ def _collect(
     session_factory: sessionmaker[Session],
     client: GitHubClient,
     run: RunContext,
-    first_page=None,
+    first_page: CodeSearchPage | None = None,
 ) -> None:
     page = first_page
     if page is None:
@@ -104,7 +140,8 @@ def _collect(
         run.increment("truncated_queries")
         run.increment("unreachable_matches", page.total_count - config.max_results_per_query)
 
-    reachable = min(page.total_count, config.max_results_per_query)
+    total = page.total_count
+    reachable = min(total, config.max_results_per_query)
     pages = max(1, math.ceil(reachable / config.page_size))
     number = 1
     while True:
@@ -116,6 +153,50 @@ def _collect(
             break
         page = client.search_code(query, page=number, per_page=config.page_size)
         run.increment("api_requests")
+    # Recorded only after every page is stored: an interrupted slice is searched again.
+    _record(session_factory, query, base_query, SliceOutcome.COLLECTED, total, run)
+
+
+def _progress(session_factory: sessionmaker[Session], slice_query: str) -> SliceOutcome | None:
+    with session_factory() as session:
+        return session.scalar(
+            select(DiscoverySlice.outcome).where(DiscoverySlice.slice_query == slice_query)
+        )
+
+
+def _record(
+    session_factory: sessionmaker[Session],
+    slice_query: str,
+    base_query: str,
+    outcome: SliceOutcome,
+    total_count: int,
+    run: RunContext,
+) -> None:
+    values = {
+        "slice_query": slice_query,
+        "base_query": base_query,
+        "outcome": outcome,
+        "total_count": total_count,
+        "run_id": run.id,
+    }
+    statement = insert(DiscoverySlice).values(**values)
+    with session_factory() as session, session.begin():
+        session.execute(
+            statement.on_conflict_do_update(
+                index_elements=[DiscoverySlice.slice_query],
+                set_={
+                    "outcome": statement.excluded.outcome,
+                    "total_count": statement.excluded.total_count,
+                    "run_id": statement.excluded.run_id,
+                    "completed_at": func.now(),
+                },
+            )
+        )
+
+
+def _forget_progress(session_factory: sessionmaker[Session], queries: Sequence[str]) -> None:
+    with session_factory() as session, session.begin():
+        session.execute(delete(DiscoverySlice).where(DiscoverySlice.base_query.in_(list(queries))))
 
 
 def _store_hits(

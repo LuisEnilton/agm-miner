@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from agm_miner.config import StudyConfig
@@ -73,22 +74,21 @@ def _select(table: Table):
     return select(*columns).order_by(*table.primary_key.columns)
 
 
-def export_table(engine: Engine, table: Table, destination: Path) -> int:
+def export_table(connection: Connection, table: Table, destination: Path) -> int:
     schema = table_schema(table)
     rows = 0
     writer: pq.ParquetWriter | None = None
     try:
-        with engine.connect() as connection:
-            result = connection.execution_options(stream_results=True).execute(_select(table))
-            while batch := result.fetchmany(_BATCH_ROWS):
-                frame = pl.DataFrame(
-                    [tuple(row) for row in batch], schema=schema, orient="row", strict=False
-                )
-                arrow = frame.to_arrow()
-                if writer is None:
-                    writer = pq.ParquetWriter(destination, arrow.schema)
-                writer.write_table(arrow)
-                rows += frame.height
+        result = connection.execution_options(stream_results=True).execute(_select(table))
+        while batch := result.fetchmany(_BATCH_ROWS):
+            frame = pl.DataFrame(
+                [tuple(row) for row in batch], schema=schema, orient="row", strict=False
+            )
+            arrow = frame.to_arrow()
+            if writer is None:
+                writer = pq.ParquetWriter(destination, arrow.schema)
+            writer.write_table(arrow)
+            rows += frame.height
         if writer is None:
             pl.DataFrame(schema=schema).write_parquet(destination)
     finally:
@@ -102,21 +102,47 @@ def export_bronze(
     session_factory: sessionmaker[Session],
     output_root: Path,
 ) -> Path:
-    """Write ``<output_root>/<timestamp>/`` with one Parquet file per table and a manifest."""
+    """Write ``<output_root>/<timestamp>/`` with one Parquet file per table and a manifest.
+
+    All tables are read inside one REPEATABLE READ transaction, so the export is a consistent
+    snapshot even while ``agm mine`` keeps writing. Files are written to ``<timestamp>.partial``
+    and renamed at the end: an interrupted export never looks like a complete one.
+    """
     engine: Engine = session_factory.kw["bind"]
     started = datetime.now(UTC)
     destination = output_root / started.strftime("%Y%m%dT%H%M%SZ")
-    destination.mkdir(parents=True, exist_ok=False)
-    with track_run(session_factory, RunStage.EXPORT, study, {"output": str(destination)}) as run:
+    staging = destination.with_name(destination.name + ".partial")
+    staging.mkdir(parents=True, exist_ok=False)
+    try:
+        _export_into(study, session_factory, engine, started, staging, destination)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    staging.rename(destination)
+    return destination
+
+
+def _export_into(
+    study: StudyConfig,
+    session_factory: sessionmaker[Session],
+    engine: Engine,
+    started: datetime,
+    staging: Path,
+    destination: Path,
+) -> None:
+    with (
+        track_run(session_factory, RunStage.EXPORT, study, {"output": str(destination)}) as run,
+        engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection,
+        connection.begin(),
+    ):
         tables: dict[str, int] = {}
         for table in Base.metadata.sorted_tables:
-            count = export_table(engine, table, destination / f"{table.name}.parquet")
+            count = export_table(connection, table, staging / f"{table.name}.parquet")
             tables[table.name] = count
             logger.info("Exported %s rows from %s", count, table.name)
-        with engine.connect() as connection:
-            schema_revision = connection.execute(
-                text("SELECT version_num FROM alembic_version")
-            ).scalar()
+        schema_revision = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar()
         manifest = {
             "exported_at": started.isoformat(),
             "export_run_id": run.id,
@@ -126,9 +152,8 @@ def export_bronze(
             "study_config": study.snapshot(),
             "tables": tables,
         }
-        (destination / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        (staging / MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         run.stats.update({f"rows:{name}": count for name, count in tables.items()})
-    return destination
 
 
 def read_manifest(bronze_dir: Path) -> dict[str, Any]:
@@ -136,7 +161,11 @@ def read_manifest(bronze_dir: Path) -> dict[str, Any]:
 
 
 def latest_export(output_root: Path) -> Path:
-    exports = sorted(path for path in output_root.iterdir() if (path / MANIFEST).exists())
+    exports = sorted(
+        path
+        for path in output_root.iterdir()
+        if not path.name.endswith(".partial") and (path / MANIFEST).exists()
+    )
     if not exports:
         raise FileNotFoundError(f"No bronze export found in {output_root}")
     return exports[-1]

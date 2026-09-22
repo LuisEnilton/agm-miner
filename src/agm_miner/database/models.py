@@ -72,6 +72,12 @@ class RunStatus(StrEnum):
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    INTERRUPTED = "INTERRUPTED"  # stopped by the user (Ctrl+C / SIGTERM)
+
+
+class SliceOutcome(StrEnum):
+    SPLIT = "SPLIT"  # too many matches; its two halves were searched instead
+    COLLECTED = "COLLECTED"  # every reachable page was stored
 
 
 class RepositoryStatus(StrEnum):
@@ -116,6 +122,24 @@ class PipelineRun(Base):
     params: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     stats: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+class DiscoverySlice(Base):
+    """Progress of the size bisection, so an interrupted discovery resumes where it stopped."""
+
+    __tablename__ = "discovery_slices"
+
+    # The exact query sent to the Search API (base query + size qualifier).
+    slice_query: Mapped[str] = mapped_column(String(600), primary_key=True)
+    base_query: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    outcome: Mapped[SliceOutcome] = mapped_column(
+        _enum(SliceOutcome, "slice_outcome"), nullable=False
+    )
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    run_id: Mapped[int] = mapped_column(ForeignKey("pipeline_runs.id"), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class DiscoveryHit(Base):

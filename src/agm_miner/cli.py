@@ -54,18 +54,29 @@ def _context(study_path: Path | None) -> tuple[Settings, StudyConfig]:
 
 
 def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
-    """Report expected failures (bad token, unknown repository, ...) as one line, exit code 1."""
+    """Report expected failures (bad token, unknown repository, ...) as one line, exit code 1;
+    Ctrl+C / SIGTERM exit with code 130 after the stage has saved its progress."""
 
     @functools.wraps(command)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
+        from agm_miner.runs import StageBusyError, interrupt_signals
         from agm_miner.stages.mining import RepositoryLookupError
         from agm_miner.stages.selection import SelectionError
 
         try:
-            return command(*args, **kwargs)
+            with interrupt_signals():
+                return command(*args, **kwargs)
+        except KeyboardInterrupt as exc:
+            typer.secho(
+                "interrupted: completed work is saved; run the same command again to continue",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+            raise typer.Exit(code=130) from exc
         except (
+            StageBusyError,
             GitError,
             GitHubAuthError,
             GitHubRequestError,
@@ -95,6 +106,9 @@ def discover(
     query: Annotated[
         list[str] | None, typer.Option("--query", "-q", help="Override the study's queries.")
     ] = None,
+    restart: Annotated[
+        bool, typer.Option(help="Forget saved progress and search every size slice again.")
+    ] = False,
     study_path: StudyOption = None,
 ) -> None:
     """Stage 1: find repositories containing agent artifacts via GitHub code search."""
@@ -103,7 +117,11 @@ def discover(
     settings, study = _context(study_path)
     _print(
         discover_repositories(
-            study, get_session_factory(settings.database_url), _github_client(settings), query
+            study,
+            get_session_factory(settings.database_url),
+            _github_client(settings),
+            query,
+            restart=restart,
         )
     )
 

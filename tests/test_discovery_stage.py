@@ -3,11 +3,20 @@ from __future__ import annotations
 import re
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from agm_miner.config import StudyConfig
-from agm_miner.database.models import DiscoveryHit, PipelineRun, Repository, RepositoryStatus
+from agm_miner.database.models import (
+    DiscoveryHit,
+    DiscoverySlice,
+    PipelineRun,
+    Repository,
+    RepositoryStatus,
+    RunStage,
+    RunStatus,
+)
 from agm_miner.github.client import CodeSearchHit, CodeSearchPage
+from agm_miner.runs import StageBusyError
 from agm_miner.stages.discovery import discover_repositories
 
 pytestmark = pytest.mark.db
@@ -69,11 +78,71 @@ def test_rediscovery_is_idempotent_and_keeps_status(session_factory) -> None:
     with session_factory() as session, session.begin():
         session.get(Repository, 1).status = RepositoryStatus.MINED
 
+    # A finished discovery is not repeated...
+    calls = len(fake.queries)
     second = discover_repositories(study(), session_factory, fake)
-    assert second["new_repositories"] == 0
+    assert second == {"queries": 1, "resumed_slices": 1}
+    assert len(fake.queries) == calls
+
+    # ...unless explicitly restarted, which searches again without duplicating anything.
+    third = discover_repositories(study(), session_factory, fake, restart=True)
+    assert third["new_repositories"] == 0 and third["hits"] == 3
     with session_factory() as session:
         assert session.get(Repository, 1).status is RepositoryStatus.MINED
         assert len(session.scalars(select(DiscoveryHit)).all()) == 3
+
+
+class InterruptingSearch(FakeSearch):
+    """Raises KeyboardInterrupt (as Ctrl+C would) on the N-th request."""
+
+    def __init__(self, *args, interrupt_at: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.interrupt_at = interrupt_at
+
+    def search_code(self, query: str, page: int, per_page: int = 100) -> CodeSearchPage:
+        if len(self.queries) + 1 == self.interrupt_at:
+            self.queries.append((query, page))
+            raise KeyboardInterrupt
+        return super().search_code(query, page, per_page)
+
+
+def test_interrupted_discovery_resumes_where_it_stopped(session_factory) -> None:
+    files = [(i + 1, i, "CLAUDE.md") for i in range(2500)]
+    config = study(size_min=0, size_max=4999)
+    uninterrupted = FakeSearch(files)
+    discover_repositories(config, session_factory, uninterrupted)
+    total_requests = len(uninterrupted.queries)
+
+    # Start over on an empty database and stop halfway through.
+    with session_factory() as session, session.begin():
+        for model in (DiscoveryHit, DiscoverySlice, Repository, PipelineRun):
+            session.execute(delete(model))
+    interrupted = InterruptingSearch(files, interrupt_at=total_requests // 2)
+    with pytest.raises(KeyboardInterrupt):
+        discover_repositories(config, session_factory, interrupted)
+    with session_factory() as session:
+        run = session.scalars(select(PipelineRun)).one()
+        assert run.status is RunStatus.INTERRUPTED
+        partial = session.scalar(select(func.count()).select_from(Repository))
+    assert 0 < partial < 2500
+
+    resumed = FakeSearch(files)
+    stats = discover_repositories(config, session_factory, resumed)
+    assert stats["resumed_slices"] >= 1
+    # Finished slices are not searched again: resuming costs less than starting over.
+    assert len(resumed.queries) < total_requests
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Repository)) == 2500
+
+
+def test_only_one_discovery_at_a_time(session_factory, pg_engine) -> None:
+    with pg_engine.connect() as other_process:
+        key = list(RunStage).index(RunStage.DISCOVER)
+        assert other_process.execute(select(func.pg_try_advisory_lock(0x41474D, key))).scalar()
+        with pytest.raises(StageBusyError, match="agm discover"):
+            discover_repositories(study(), session_factory, FakeSearch([]))
+        other_process.execute(select(func.pg_advisory_unlock(0x41474D, key)))
+    assert discover_repositories(study(), session_factory, FakeSearch([]))["queries"] == 1
 
 
 def test_unsplittable_slices_are_reported_as_truncated(session_factory) -> None:

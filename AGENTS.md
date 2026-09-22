@@ -54,7 +54,8 @@ src/agm_miner/
   github/client.py    # REST code search + GraphQL, com pacing, quota por bucket e retry limitado
   stages/             # discovery, selection, mining (persistência + concorrência), export
   analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets
-  database/           # models.py (schema) e session.py (engine único por URL)
+  database/           # models.py (schema), session.py (engine único por URL) e schema.py
+                      # (todo comando do CLI recusa um banco fora da revisão head do Alembic)
 ```
 
 Princípios que precisam ser mantidos:

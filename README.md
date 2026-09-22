@@ -199,6 +199,32 @@ repositório desconhecido, estágio já em execução); `130` interrompido.
 Repositórios `FAILED` guardam o motivo em `last_error` e quantas tentativas já houve em
 `attempts`. Eles só são tentados de novo com `--retry-failed`.
 
+### Banco criado por uma versão antiga
+
+Todo comando confere, antes de começar, se o banco está na revisão de schema que o código espera.
+Se não estiver, o comando para com uma mensagem como:
+
+```
+error: Cannot use postgresql+psycopg2://...: the database is at schema revision 20260719_0001,
+which this code does not know (it was created by an incompatible version of agm-miner)...
+```
+
+- **Revisão conhecida, mas antiga** (ex.: `0002` com o código em `0003`): basta
+  `poetry run alembic upgrade head`.
+- **Revisão desconhecida** (banco da versão anterior à refatoração, com status `PENDING` e
+  `COMPLETED`): o schema é incompatível e não há migração. Preserve o banco antigo com outro nome e
+  crie um novo:
+
+  ```bash
+  docker exec msr_research_db psql -U research_user -d postgres \
+    -c "ALTER DATABASE agent_artifacts_research RENAME TO agent_artifacts_research_legacy" \
+    -c "CREATE DATABASE agent_artifacts_research"
+  poetry run alembic upgrade head
+  ```
+
+  O banco `*_legacy` continua disponível para consulta. Para apagá-lo de vez:
+  `DROP DATABASE agent_artifacts_research_legacy`.
+
 ## Configuração do estudo
 
 Os parâmetros metodológicos ficam em [study.yaml](study.yaml): queries, critérios de seleção,

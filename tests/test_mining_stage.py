@@ -23,7 +23,7 @@ from agm_miner.database.models import (
     RepositoryStatus,
     RunStatus,
 )
-from agm_miner.stages.mining import MiningOptions, UnknownRepositoriesError, mine_repositories
+from agm_miner.stages.mining import MiningOptions, RepositoryLookupError, mine_repositories
 from tests.gitrepo import RepoBuilder
 
 pytestmark = [pytest.mark.db, pytest.mark.git]
@@ -146,7 +146,7 @@ def test_only_selected_repositories_are_candidates(settings, session_factory, or
 
 
 def test_unknown_explicit_repository_fails_the_run(settings, session_factory, origin) -> None:
-    with pytest.raises(UnknownRepositoriesError, match="agm add-repo"):
+    with pytest.raises(RepositoryLookupError, match="agm add-repo"):
         mine(settings, session_factory, origin, repo_names=["ghost/repo"])
     with session_factory() as session:
         assert session.scalars(select(PipelineRun)).one().status is RunStatus.FAILED
@@ -188,3 +188,11 @@ def test_locked_repository_is_skipped(settings, session_factory, origin, pg_engi
         assert mine(settings, session_factory, origin) == {"candidates": 1, "locked": 1}
         other_worker.execute(select(func.pg_advisory_unlock(42)))
     assert mine(settings, session_factory, origin) == {"candidates": 1, "mined": 1}
+
+
+def test_ambiguous_explicit_name_fails_the_run(settings, session_factory, origin) -> None:
+    add_repository(session_factory)
+    with session_factory() as session, session.begin():
+        session.add(Repository(id=43, node_id="R_43", full_name="acme/widget"))
+    with pytest.raises(RepositoryLookupError, match="select --reevaluate"):
+        mine(settings, session_factory, origin, repo_names=["acme/widget"])

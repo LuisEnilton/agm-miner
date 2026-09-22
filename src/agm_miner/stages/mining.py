@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 _ERROR_MAX_CHARS = 4000
 
 
-class UnknownRepositoriesError(LookupError):
-    """Repositories requested by name are not registered."""
+class RepositoryLookupError(LookupError):
+    """Repositories requested by name are unknown or ambiguous."""
 
 
 class MiningOutcome(StrEnum):
@@ -127,8 +127,15 @@ def _candidates(session_factory: sessionmaker[Session], options: MiningOptions) 
     if options.repo_names:
         missing = set(options.repo_names) - {name for _, name in rows}
         if missing:
-            raise UnknownRepositoriesError(
+            raise RepositoryLookupError(
                 f"Unknown repositories (add them first with `agm add-repo`): {sorted(missing)}"
+            )
+        names = [name for _, name in rows]
+        ambiguous = sorted({name for name in names if names.count(name) > 1})
+        if ambiguous:
+            raise RepositoryLookupError(
+                f"Names shared by several repositories (run `agm select --reevaluate` to refresh "
+                f"their current names): {ambiguous}"
             )
     return [repo_id for repo_id, _ in rows]
 

@@ -142,7 +142,9 @@ class Repository(Base):
 
     # GitHub's numeric repository id (stable across renames).
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    full_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    # Not unique: after a rename or deletion GitHub can give the same name to another
+    # repository; the numeric id (and node_id) is the identity.
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     # GraphQL global node id (lets the selection stage fetch metadata even after renames).
     node_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
 

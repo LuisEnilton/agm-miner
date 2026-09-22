@@ -79,6 +79,12 @@ def test_metadata_parsing() -> None:
         ({"pushedAt": "2025-05-01T00:00:00Z"}, "inactive"),
         ({"nameWithOwner": "org/awesome-claude-code"}, "keyword:awesome"),
         ({"description": "A tutorial on agents"}, "keyword:tutorial"),
+        # Singular and plural forms match the same keyword (observed: "mern-stack-example").
+        ({"nameWithOwner": "org/mern-stack-example"}, "keyword:example"),
+        ({"description": "Tutorials for agents"}, "keyword:tutorial"),
+        ({"description": "Collection of useful prompts"}, "keyword:prompt"),
+        # Words ending in "ss" are not plurals.
+        ({"description": "Process manager"}, None),
         (
             {"repositoryTopics": {"nodes": [{"topic": {"name": "boilerplate"}}]}},
             "keyword:boilerplate",
@@ -186,3 +192,83 @@ def test_add_repositories_registers_and_tags_manual_additions(session_factory) -
         assert hit.query == MANUAL_QUERY
     with pytest.raises(SelectionError, match="not found"):
         add_repositories(study, session_factory, fake, ["org/missing"])
+
+
+@pytest.mark.db
+def test_reused_names_do_not_break_selection(session_factory) -> None:
+    """GitHub may give the name of a renamed/deleted repository to another one."""
+    with session_factory() as session, session.begin():
+        # Row 1 still has the old name "org/app"; repository 2 is the one now called "org/app".
+        session.add(Repository(id=1, node_id="R_1", full_name="org/app"))
+        session.add(Repository(id=2, node_id="R_2", full_name="org/app-new"))
+    fake = FakeGraphQL(
+        {"R_1": node(1, nameWithOwner="org/renamed"), "R_2": node(2, nameWithOwner="org/app")}
+    )
+    study = StudyConfig.model_validate({"selection": {"reference_date": "2026-06-01"}})
+    assert select_repositories(study, session_factory, fake)["selected"] == 2
+    with session_factory() as session:
+        assert session.get(Repository, 1).full_name == "org/renamed"
+        assert session.get(Repository, 2).full_name == "org/app"
+
+
+@pytest.mark.db
+def test_add_repository_whose_name_belongs_to_a_stale_row(session_factory) -> None:
+    with session_factory() as session, session.begin():
+        session.add(Repository(id=5, node_id="R_5", full_name="org/repo9"))
+    fake = FakeGraphQL({}, by_name={"org/repo9": node(9)})
+    study = StudyConfig.model_validate({"selection": {"reference_date": "2026-06-01"}})
+    assert add_repositories(study, session_factory, fake, ["org/repo9"]) == {"added": 1}
+    with session_factory() as session:
+        names = session.scalars(select(Repository.id).where(Repository.full_name == "org/repo9"))
+        assert sorted(names) == [5, 9]
+
+
+@pytest.mark.db
+def test_legacy_node_ids_are_matched_by_position(session_factory) -> None:
+    """The REST search API returns legacy ids; GraphQL answers with the new-format id."""
+    with session_factory() as session, session.begin():
+        session.add(Repository(id=1, node_id="MDEwOlJlcG9zaXRvcnkx", full_name="org/repo1"))
+
+    class Canonicalising:
+        def graphql(self, query, variables):
+            assert variables == {"ids": ["MDEwOlJlcG9zaXRvcnkx"]}
+            return {"data": {"nodes": [node(1, id="R_kgDOAAAAAQ")]}}
+
+    study = StudyConfig.model_validate({"selection": {"reference_date": "2026-06-01"}})
+    assert select_repositories(study, session_factory, Canonicalising()) == {"selected": 1}
+    with session_factory() as session:
+        assert session.get(Repository, 1).node_id == "R_kgDOAAAAAQ"
+
+
+def test_fetch_metadata_rejects_misaligned_answers() -> None:
+    class Short:
+        def graphql(self, query, variables):
+            return {"data": {"nodes": [node(1)]}}
+
+    with pytest.raises(SelectionError, match="1 nodes for 2 ids"):
+        fetch_metadata(Short(), ["R_1", "R_2"])
+
+
+@pytest.mark.db
+def test_reevaluation_covers_mined_repositories(session_factory) -> None:
+    with session_factory() as session, session.begin():
+        session.add(
+            Repository(id=1, node_id="R_1", full_name="org/repo1", status=RepositoryStatus.MINED)
+        )
+        session.add(
+            Repository(id=2, node_id="R_2", full_name="org/repo2", status=RepositoryStatus.MINED)
+        )
+        session.add(
+            Repository(id=3, node_id="R_3", full_name="org/repo3", status=RepositoryStatus.FAILED)
+        )
+    fake = FakeGraphQL(
+        {"R_1": node(1), "R_2": node(2, nameWithOwner="org/mern-stack-example"), "R_3": node(3)}
+    )
+    study = StudyConfig.model_validate({"selection": {"reference_date": "2026-06-01"}})
+    assert select_repositories(study, session_factory, fake) == {}
+    stats = select_repositories(study, session_factory, fake, reevaluate=True)
+    assert stats == {"selected": 2, "rejected": 1, "rejected:keyword": 1}
+    with session_factory() as session:
+        assert session.get(Repository, 1).status is RepositoryStatus.MINED
+        assert session.get(Repository, 2).status is RepositoryStatus.REJECTED
+        assert session.get(Repository, 3).status is RepositoryStatus.FAILED

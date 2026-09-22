@@ -90,21 +90,20 @@ class SelectionConfig(_StrictModel):
     # Fixed so that re-running selection later yields the same result. Defaults to the run date
     # when omitted (the effective value is stored in the run record).
     reference_date: date | None = None
-    # Case-insensitive whole-word matches against name, description and topics flag tutorials,
-    # curated lists and similar non-product repositories.
+    # Case-insensitive whole-word matches (singular and plural) against name, description and
+    # topics flag tutorials, curated lists and similar non-product repositories.
     exclude_keywords: list[str] = Field(
         default_factory=lambda: [
             "awesome",
             "tutorial",
-            "tutorials",
             "course",
             "boilerplate",
             "cheatsheet",
-            "examples",
+            "example",
             "starter",
             "template",
             "dotfiles",
-            "prompts",
+            "prompt",
         ]
     )
     graphql_batch_size: int = 25

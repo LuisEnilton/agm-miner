@@ -60,7 +60,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
-        from agm_miner.stages.mining import UnknownRepositoriesError
+        from agm_miner.stages.mining import RepositoryLookupError
         from agm_miner.stages.selection import SelectionError
 
         try:
@@ -70,7 +70,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             GitHubAuthError,
             GitHubRequestError,
             SelectionError,
-            UnknownRepositoriesError,
+            RepositoryLookupError,
             FileNotFoundError,
         ) as exc:
             typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
@@ -112,7 +112,7 @@ def discover(
 @_handle_errors
 def select_command(
     reevaluate: Annotated[
-        bool, typer.Option(help="Also re-evaluate SELECTED and REJECTED repositories.")
+        bool, typer.Option(help="Re-check every repository against the current criteria.")
     ] = False,
     limit: Annotated[int | None, typer.Option(help="Process at most N repositories.")] = None,
     study_path: StudyOption = None,

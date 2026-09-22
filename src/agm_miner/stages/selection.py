@@ -145,11 +145,16 @@ def _timestamp(value: str | None) -> datetime | None:
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
+def _singular(word: str) -> str:
+    """Strip a plural "s" so "example" and "examples" match the same keyword."""
+    return word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+
+
 def _words(*texts: str | None) -> set[str]:
     words: set[str] = set()
     for text in texts:
         if text:
-            words.update(_WORD_RE.findall(text.lower()))
+            words.update(_singular(word) for word in _WORD_RE.findall(text.lower()))
     return words
 
 
@@ -176,7 +181,7 @@ def evaluate(metadata: RepositoryMetadata, config: SelectionConfig, reference: d
     name = metadata.full_name.split("/", 1)[-1]
     words = _words(name, metadata.description, *metadata.topics)
     for keyword in config.exclude_keywords:
-        if keyword.lower() in words:
+        if _singular(keyword.lower()) in words:
             return f"keyword:{keyword.lower()}"
     return None
 
@@ -196,17 +201,24 @@ def select_repositories(
     reevaluate: bool = False,
     limit: int | None = None,
 ) -> dict[str, int]:
-    """Fetch metadata for DISCOVERED repositories (plus SELECTED/REJECTED with ``reevaluate``)
-    and mark each one SELECTED or REJECTED."""
+    """Fetch metadata for DISCOVERED repositories and mark each one SELECTED or REJECTED.
+
+    With ``reevaluate`` every other repository is checked again against the current criteria
+    (e.g. after ``study.yaml`` changed). Mined or failed repositories that still qualify keep
+    their status; those that no longer qualify become REJECTED, which excludes them from the
+    analysis datasets.
+    """
     statuses = [RepositoryStatus.DISCOVERED]
     if reevaluate:
-        statuses += [RepositoryStatus.SELECTED, RepositoryStatus.REJECTED]
+        statuses += [
+            status for status in RepositoryStatus if status is not RepositoryStatus.DISCOVERED
+        ]
     reference = reference_date(study.selection)
     params = {"reevaluate": reevaluate, "limit": limit, "reference_date": reference.isoformat()}
     with track_run(session_factory, RunStage.SELECT, study, params) as run:
         with session_factory() as session:
             query = (
-                select(Repository.id, Repository.node_id)
+                select(Repository.id, Repository.node_id, Repository.status)
                 .where(Repository.status.in_(statuses))
                 .order_by(Repository.id)
             )
@@ -216,22 +228,34 @@ def select_repositories(
         batch_size = study.selection.graphql_batch_size
         for start in range(0, len(pending), batch_size):
             batch = pending[start : start + batch_size]
-            metadata = fetch_metadata(client, [node_id for _, node_id in batch])
+            metadata = fetch_metadata(client, [node_id for _, node_id, _ in batch])
             _apply(session_factory, batch, metadata, study.selection, reference, run)
         return dict(run.stats)
 
 
+# Statuses that already carry mining results (or a mining error) and survive re-selection.
+_KEPT_WHEN_QUALIFYING = frozenset({RepositoryStatus.MINED, RepositoryStatus.FAILED})
+
+
 def fetch_metadata(client: GitHubClient, node_ids: Sequence[str]) -> dict[str, RepositoryMetadata]:
-    """Metadata by node id; ids GitHub does not resolve (deleted/private) are absent."""
-    response = client.graphql(NODES_QUERY, {"ids": list(node_ids)})
+    """Metadata keyed by the *requested* node id; unresolvable ids (deleted/private) are absent.
+
+    Results are matched by position, which ``nodes(ids:)`` guarantees: GitHub answers legacy ids
+    (``MDEw...``, still returned by the REST search API) with the new-format id (``R_kg...``).
+    """
+    requested = list(node_ids)
+    response = client.graphql(NODES_QUERY, {"ids": requested})
     data = response.get("data")
     errors = response.get("errors") or []
     unexpected = [error for error in errors if error.get("type") != "NOT_FOUND"]
     if data is None or unexpected:
         raise SelectionError(f"GraphQL error: {unexpected or errors}")
+    nodes = data.get("nodes") or []
+    if len(nodes) != len(requested):
+        raise SelectionError(f"GraphQL returned {len(nodes)} nodes for {len(requested)} ids")
     return {
-        node["id"]: RepositoryMetadata.from_graphql(node)
-        for node in data.get("nodes") or []
+        node_id: RepositoryMetadata.from_graphql(node)
+        for node_id, node in zip(requested, nodes, strict=True)
         if node  # null for unresolvable ids
     }
 
@@ -246,17 +270,21 @@ def _apply(
 ) -> None:
     fetched_at = datetime.now(UTC)
     with session_factory() as session, session.begin():
-        for repo_id, node_id in batch:
+        for repo_id, node_id, status in batch:
             found = metadata.get(node_id)
             if found is None:
                 values: dict[str, Any] = {"rejection_reason": NOT_FOUND}
                 reason: str | None = NOT_FOUND
             else:
                 reason = evaluate(found, config, reference)
-                values = found.as_columns() | {"rejection_reason": reason}
-            values["status"] = (
-                RepositoryStatus.SELECTED if reason is None else RepositoryStatus.REJECTED
-            )
+                # Store the canonical (new-format) node id returned by GitHub.
+                values = found.as_columns() | {"node_id": found.node_id, "rejection_reason": reason}
+            if reason is not None:
+                values["status"] = RepositoryStatus.REJECTED
+            elif status in _KEPT_WHEN_QUALIFYING:
+                values["status"] = status
+            else:
+                values["status"] = RepositoryStatus.SELECTED
             values["metadata_fetched_at"] = fetched_at
             session.execute(update(Repository).where(Repository.id == repo_id).values(**values))
             run.increment("selected" if reason is None else "rejected")

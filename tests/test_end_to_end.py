@@ -8,6 +8,8 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from agm_miner.analysis.datasets import build_datasets
 from agm_miner.config import AnalysisConfig, Settings, StudyConfig
@@ -24,6 +26,15 @@ from agm_miner.stages.selection import MANUAL_QUERY
 from tests.gitrepo import RepoBuilder
 
 pytestmark = [pytest.mark.db, pytest.mark.git]
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def alembic_head() -> str:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    return ScriptDirectory.from_config(config).get_current_head()
+
 
 HUMAN = ("Ana Dev", "ana@example.org")
 BOT = ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com")
@@ -99,7 +110,7 @@ def bronze(tmp_path: Path, session_factory, repo_builder: RepoBuilder) -> Path:
 
 def test_bronze_export_contains_every_table_with_typed_columns(bronze: Path) -> None:
     manifest = read_manifest(bronze)
-    assert manifest["schema_revision"] == "0001"
+    assert manifest["schema_revision"] == alembic_head()
     assert set(manifest["tables"]) == {table.name for table in Base.metadata.sorted_tables}
     assert manifest["tables"]["artifacts"] == 2
     assert latest_export(bronze.parent) == bronze
@@ -164,5 +175,5 @@ def test_gold_datasets(bronze: Path, tmp_path: Path) -> None:
     assert features["artifact_changes"] == 3 and features["artifact_commits"] == 3
     assert features["manual_only"] is True
     manifest = json.loads((output / "analysis_manifest.json").read_text())
-    assert manifest["bronze_manifest"]["schema_revision"] == "0001"
+    assert manifest["bronze_manifest"]["schema_revision"] == alembic_head()
     assert manifest["outputs"]["rq3_changes"] == counts["rq3_changes"]

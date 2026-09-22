@@ -1,0 +1,27 @@
+# Methodological parameters of the study. Every pipeline run stores a snapshot of this file
+# (pipeline_runs.study_config), so change values here instead of editing code.
+# Omitted keys fall back to the defaults in src/agm_miner/config.py.
+version: 1
+
+discovery:
+  queries:
+    - "filename:CLAUDE.md"
+    - "filename:AGENTS.md"
+    - "path:.claude/skills filename:SKILL.md"
+
+selection:
+  min_stars: 50
+  min_commits: 10
+  exclude_forks: true
+  exclude_archived: true
+  exclude_templates: true
+  exclude_mirrors: true
+  active_within_days: 365
+  reference_date: null   # set a fixed date (YYYY-MM-DD) before the final data collection
+
+mining:
+  max_content_bytes: 2097152
+  rename_candidate_limit: 200
+
+analysis:
+  burst_window_hours: 24

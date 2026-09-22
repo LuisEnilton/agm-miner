@@ -21,6 +21,7 @@ from typing import Annotated, ParamSpec, TypeVar
 
 import typer
 from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
 from agm_miner.config import Settings, StudyConfig, get_settings, load_study_config
 from agm_miner.database.models import PipelineRun
@@ -60,6 +61,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
 
     @functools.wraps(command)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        from agm_miner.database.schema import SchemaMismatchError
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
         from agm_miner.runs import StageBusyError, interrupt_signals
@@ -77,6 +79,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             )
             raise typer.Exit(code=130) from exc
         except (
+            SchemaMismatchError,
             StageBusyError,
             GitError,
             GitHubAuthError,
@@ -89,6 +92,15 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             raise typer.Exit(code=1) from exc
 
     return wrapper
+
+
+def _database(settings: Settings) -> sessionmaker[Session]:
+    """Session factory for DATABASE_URL, refusing a database at another schema revision."""
+    from agm_miner.database.schema import ensure_current_schema
+
+    factory = get_session_factory(settings.database_url)
+    ensure_current_schema(factory.kw["bind"])
+    return factory
 
 
 def _print(result: object) -> None:
@@ -119,7 +131,7 @@ def discover(
     _print(
         discover_repositories(
             study,
-            get_session_factory(settings.database_url),
+            _database(settings),
             _github_client(settings),
             query,
             restart=restart,
@@ -143,7 +155,7 @@ def select_command(
     _print(
         select_repositories(
             study,
-            get_session_factory(settings.database_url),
+            _database(settings),
             _github_client(settings),
             reevaluate=reevaluate,
             limit=limit,
@@ -161,11 +173,7 @@ def add_repo(
     from agm_miner.stages.selection import add_repositories
 
     settings, study = _context(study_path)
-    _print(
-        add_repositories(
-            study, get_session_factory(settings.database_url), _github_client(settings), names
-        )
-    )
+    _print(add_repositories(study, _database(settings), _github_client(settings), names))
 
 
 @app.command()
@@ -198,7 +206,7 @@ def mine(
         force=force,
         keep_clones=keep_clones,
     )
-    _print(mine_repositories(settings, study, get_session_factory(settings.database_url), options))
+    _print(mine_repositories(settings, study, _database(settings), options))
 
 
 @app.command()
@@ -213,9 +221,7 @@ def export(
     from agm_miner.stages.export import export_bronze
 
     settings, study = _context(study_path)
-    destination = export_bronze(
-        study, get_session_factory(settings.database_url), output or settings.bronze_dir
-    )
+    destination = export_bronze(study, _database(settings), output or settings.bronze_dir)
     typer.echo(str(destination))
 
 
@@ -280,7 +286,7 @@ def run(
         study_path=study_path,
         queries=tuple(query or ()),
     )
-    result = run_pipeline(get_session_factory(settings.database_url), options)
+    result = run_pipeline(_database(settings), options)
     _print(
         {
             "exit_code": result.exit_code,
@@ -295,10 +301,11 @@ def run(
 
 
 @runs_app.command("list")
+@_handle_errors
 def runs_list(limit: Annotated[int, typer.Option(help="Show the N latest runs.")] = 20) -> None:
     """Latest pipeline runs with their statistics."""
     settings, _ = _context(None)
-    with get_session_factory(settings.database_url)() as session:
+    with _database(settings)() as session:
         runs = session.scalars(
             select(PipelineRun).order_by(PipelineRun.id.desc()).limit(limit)
         ).all()
@@ -321,12 +328,13 @@ def runs_list(limit: Annotated[int, typer.Option(help="Show the N latest runs.")
 
 
 @runs_app.command()
+@_handle_errors
 def funnel() -> None:
     """Repository counts per status and rejection reason (selection funnel)."""
     from agm_miner.stages.selection import funnel as compute_funnel
 
     settings, _ = _context(None)
-    with get_session_factory(settings.database_url)() as session:
+    with _database(settings)() as session:
         rows = compute_funnel(session)
     _print(
         [

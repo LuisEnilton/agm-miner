@@ -136,6 +136,51 @@ poetry run agm runs list      # execuções, status (RUNNING/SUCCEEDED/INTERRUPT
 poetry run agm runs funnel    # quantos repositórios em cada status e por que foram rejeitados
 ```
 
+### Coleta automática com `agm run`
+
+`agm run` faz a coleta da seção acima sozinho, num único terminal:
+
+```bash
+poetry run agm run --workers 4
+```
+
+Ele executa cada estágio como um processo `agm <estágio>` separado e decide quando lançar cada
+um a partir dos status no banco:
+
+1. `discover` roda uma vez;
+2. `select` é relançado, no máximo a cada `--select-interval` segundos (padrão 60), enquanto
+   houver repositórios `DISCOVERED`;
+3. `mine --workers N` é relançado, no máximo a cada `--mine-interval` segundos (padrão 60),
+   enquanto houver repositórios `SELECTED`;
+4. quando a busca termina e não sobra nada para selecionar nem minerar, roda `export` e depois
+   `analyze`.
+
+A saída de cada estágio aparece com um prefixo (`[discover]`, `[select]`, `[mine]`...). A cada
+`--status-interval` segundos, uma linha `[run] status: ...` mostra quantos repositórios há em cada
+status e quais estágios estão rodando. No fim, é impresso um resumo em JSON.
+
+Como tudo é feito pelos comandos individuais, todas as garantias acima continuam valendo:
+
+- **Ctrl+C / `kill`**: o sinal é repassado uma vez a cada estágio em execução. 1× para com calma
+  (o `mine` termina os repositórios em andamento), 2× aborta. O `agm run` sai com o código `130`,
+  e basta rodá-lo de novo para continuar: a busca retoma pelas fatias pendentes, e os repositórios
+  já minerados são pulados.
+- **Falha de um estágio** (ex.: token inválido): nada novo é iniciado, os estágios em execução
+  terminam, e o `agm run` sai com o código `1`, sem exportar. O resumo indica o estágio em
+  `failed_stage`.
+- **Instância única**: um segundo `agm run` no mesmo banco falha logo no início, porque o
+  `discover` dele é recusado. Para acelerar a mineração, abra `agm mine` em outros terminais: eles
+  dividem o trabalho com o `agm run`.
+
+| Opção | Efeito |
+|---|---|
+| `--workers N` | Repositórios minerados em paralelo por cada `mine` (padrão 4). |
+| `--no-discover` | Não busca; só processa o que já está `DISCOVERED`/`SELECTED` (esvaziar a fila). |
+| `-q/--query "..."` | Usa outra query no `discover` no lugar das do `study.yaml`. |
+| `--no-export` | Termina sem exportar. Nesse caso o `analyze` também não roda, para não analisar um export antigo. |
+| `--no-analyze` | Exporta, mas não analisa. |
+| `--select-interval`, `--mine-interval`, `--status-interval` | Intervalos em segundos (veja acima). |
+
 ### Opções úteis
 
 | Comando | Opções |

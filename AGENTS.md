@@ -28,6 +28,7 @@ poetry run agm add-repo owner/name  #    registra repositórios à mão (marcado
 poetry run agm mine --workers 4     # 3. clone git parcial → commits, versões, mudanças
 poetry run agm export               # 4. banco → data/bronze/<timestamp>/*.parquet + manifest.json
 poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silver + gold por RQ)
+poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
@@ -47,6 +48,7 @@ src/agm_miner/
   artifacts.py        # FONTE ÚNICA das regras de artefato (classify_path, GIT_PATHSPECS)
   file_categories.py  # categoria de qualquer arquivo (code, test, docs, ci, agent_artifact, ...)
   runs.py             # track_run(): toda execução vai para pipeline_runs (+ code_version)
+  orchestrator.py     # agm run: supervisor que lança `agm <estágio>` como processos filhos
   extraction.py       # clone git → registros brutos (sem banco); os 8 passes estão na docstring
   git/                # runner (subprocess -z, streaming, timeout), parsing (puro), repository
   github/client.py    # REST code search + GraphQL, com pacing, quota por bucket e retry limitado
@@ -85,7 +87,10 @@ Princípios que precisam ser mantidos:
    - `export` e `analyze` escrevem em `.partial` e renomeiam no fim.
 
    Um código novo que grave estado precisa manter essas propriedades.
-9. **Concorrência**: `discover` e `select` são de instância única (`runs.exclusive_stage`, lock
+9. **`agm run` só agenda**: cada estágio roda como processo `agm <estágio>` (sessão própria),
+   e o supervisor repassa cada sinal recebido uma única vez (`_Child.deliver_signals`). Não mova
+   a lógica de estágio para dentro do orquestrador; garantias novas vão para os comandos.
+10. **Concorrência**: `discover` e `select` são de instância única (`runs.exclusive_stage`, lock
    consultivo de duas chaves). `mine` aceita vários processos (lock por repositório). `export` lê
    num único snapshot `REPEATABLE READ`.
 

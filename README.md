@@ -71,6 +71,89 @@ poetry run agm add-repo openai/codex anthropics/claude-code-action
 poetry run agm mine --repo openai/codex --repo anthropics/claude-code-action
 ```
 
+## Usando o CLI
+
+### Onde o estado fica guardado
+
+Todo o progresso fica **no Postgres**, não no processo. Um comando interrompido pode ser rodado
+de novo a qualquer momento, inclusive em outro terminal, e continua de onde parou. O que marca o
+progresso:
+
+- o `status` de cada repositório: `DISCOVERED → SELECTED | REJECTED → MINED | FAILED`;
+- a tabela `discovery_slices`, com o progresso da busca;
+- a tabela `pipeline_runs`, com o histórico das execuções.
+
+Só `export` e `analyze` escrevem arquivos (em `DATA_DIR`).
+
+Os dados do Postgres ficam no volume Docker `pgdata`. `docker compose down` mantém o volume;
+**`docker compose down -v` apaga tudo**.
+
+### Posso parar a qualquer momento?
+
+Sim. Ctrl+C e `kill <pid>` (SIGTERM) têm o mesmo efeito. O comando grava o que já terminou, marca
+a execução como `INTERRUPTED` e sai com o código `130`, mostrando a mensagem
+`interrupted: completed work is saved; run the same command again to continue`.
+
+| Comando | O que é salvo durante a execução | Ao interromper | Para continuar |
+|---|---|---|---|
+| `discover` | Cada página de resultados e cada fatia da busca concluída (`discovery_slices`) | A fatia em andamento é refeita; as concluídas não | `agm discover` de novo (`--restart` recomeça do zero) |
+| `select` | Cada lote de 25 repositórios | O lote em andamento é descartado | `agm select` de novo (processa o que ainda está `DISCOVERED`) |
+| `mine` | Cada repositório, inteiro, numa única transação | **1º Ctrl+C**: nenhum repositório novo começa, os em andamento terminam e são salvos. **2º Ctrl+C**: aborta os em andamento, que voltam ao status anterior, sem virar `FAILED` | `agm mine` de novo |
+| `export` | Nada até o fim (a pasta fica como `.partial`) | A pasta parcial é apagada; nenhum export incompleto fica visível | `agm export` de novo |
+| `analyze` | Nada até o fim | A saída anterior continua intacta | `agm analyze` de novo |
+
+Um repositório nunca fica pela metade no banco: ou todos os dados dele são gravados, ou nenhum.
+
+Se o processo for morto sem chance de reagir (`kill -9`, queda de energia), os dados continuam
+consistentes pelo mesmo motivo. A única diferença é que a execução fica como `RUNNING` em
+`agm runs list`. Basta rodar o comando de novo.
+
+### Posso rodar em dois terminais?
+
+| Combinação | Pode? | Por quê |
+|---|---|---|
+| `mine` + `mine` (ou mais) | Sim | Cada repositório tem um lock no Postgres: os processos dividem o trabalho sem minerar o mesmo repositório duas vezes. Funciona também em máquinas diferentes apontando para o mesmo banco. |
+| `discover` + `discover` | Não | Os dois disputariam a mesma quota do token. O segundo sai com `error: Another agm discover is already running`. |
+| `select` + `select` | Não | Mesmo motivo; o segundo é recusado. |
+| `discover` + `select` + `mine` | Sim | Usam cotas diferentes da API (Code Search × GraphQL × clone git) e formam um pipeline: o `select` processa o que o `discover` já encontrou, e o `mine` o que o `select` já aprovou. |
+| `export` durante um `mine` | Sim | O export lê todas as tabelas de um único snapshot consistente. Repositórios minerados depois dele entram no próximo export. |
+| `analyze` a qualquer momento | Sim | Lê apenas um export em disco, não o banco. |
+
+Exemplo de coleta longa em três terminais:
+
+```bash
+# Terminal 1: busca (pode levar horas; cada requisição de busca espera 6,5 s)
+poetry run agm discover
+
+# Terminal 2: repita de tempos em tempos para aprovar o que já foi encontrado
+poetry run agm select
+
+# Terminal 3: minera em paralelo o que já foi aprovado
+poetry run agm mine --workers 4
+
+# Em qualquer terminal: acompanhe o andamento
+poetry run agm runs list      # execuções, status (RUNNING/SUCCEEDED/INTERRUPTED/FAILED) e estatísticas
+poetry run agm runs funnel    # quantos repositórios em cada status e por que foram rejeitados
+```
+
+### Opções úteis
+
+| Comando | Opções |
+|---|---|
+| `discover` | `-q/--query "..."` usa outra query no lugar das do `study.yaml`. `--restart` esquece o progresso salvo. |
+| `select` | `--limit N` processa só N repositórios. `--reevaluate` reaplica os critérios atuais a todos os repositórios, inclusive os minerados (use depois de mudar o `study.yaml`). |
+| `mine` | `--workers N` minera N repositórios em paralelo. `--limit N` limita a quantidade. `--repo owner/name` minera só os repositórios indicados, com qualquer status. `--retry-failed` tenta de novo os `FAILED`. `--refresh` minera de novo os `MINED` cujo HEAD mudou. `--force` minera de novo mesmo sem mudança. `--keep-clones` mantém os clones em `CLONE_DIR`. |
+| `export` | `--output DIR` define a pasta de destino (padrão: `DATA_DIR/bronze`). |
+| `analyze` | `--bronze DIR` escolhe o export (padrão: o mais recente). `--output DIR` define a saída. |
+
+Todos aceitam `--study caminho.yaml` para usar outra configuração do estudo.
+
+Códigos de saída: `0` sucesso; `1` erro esperado, com mensagem de uma linha (token inválido,
+repositório desconhecido, estágio já em execução); `130` interrompido.
+
+Repositórios `FAILED` guardam o motivo em `last_error` e quantas tentativas já houve em
+`attempts`. Eles só são tentados de novo com `--retry-failed`.
+
 ## Configuração do estudo
 
 Os parâmetros metodológicos ficam em [study.yaml](study.yaml): queries, critérios de seleção,

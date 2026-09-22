@@ -74,10 +74,25 @@ Princípios que precisam ser mantidos:
    fetch objeto por objeto. Renomeação/cópia (`-M -C`) só roda nos commits que adicionaram artefatos.
 7. **Pacing da API do GitHub**: toda chamada passa por `GitHubClient._request` (intervalo mínimo
    de 6,5s na code search, quota lida dos headers, retry com limite). Não chame o PyGithub direto.
+8. **Todo estágio pode ser interrompido e retomado** (seção "Usando o CLI" do README):
+   - o estado fica só no Postgres, e cada unidade de trabalho (página/fatia, lote, repositório) é
+     commitada inteira;
+   - `track_run` registra `INTERRUPTED`, e o CLI instala os tratadores de SIGINT/SIGTERM
+     (`runs.interrupt_signals`) e sai com o código 130;
+   - no `mine`, os sinais só escalam `Cancellation`: o 1º para de agendar, o 2º mata os processos
+     git (`terminate_active_processes`) sem marcar `FAILED`. O git roda em sessão própria para o
+     Ctrl+C do terminal não atingi-lo;
+   - `export` e `analyze` escrevem em `.partial` e renomeiam no fim.
+
+   Um código novo que grave estado precisa manter essas propriedades.
+9. **Concorrência**: `discover` e `select` são de instância única (`runs.exclusive_stage`, lock
+   consultivo de duas chaves). `mine` aceita vários processos (lock por repositório). `export` lê
+   num único snapshot `REPEATABLE READ`.
 
 ## Modelo de dados ([database/models.py](src/agm_miner/database/models.py))
 
-- `pipeline_runs`: estágio, status, params, stats, `study_config` (JSONB), `code_version`.
+- `pipeline_runs`: estágio, status (`RUNNING`/`SUCCEEDED`/`FAILED`/`INTERRUPTED`), params, stats,
+  `study_config` (JSONB), `code_version`.
 - `repositories`: id numérico do GitHub + `node_id` (GraphQL), metadados da seleção
   (`metadata_fetched_at`), status `DISCOVERED → SELECTED|REJECTED → MINED|FAILED` e
   `rejection_reason` (primeiro critério que falhou). A identidade é o `id`. O `full_name` **não é
@@ -86,7 +101,7 @@ Princípios que precisam ser mantidos:
   continuam qualificados mantêm o status, e os que não se qualificam mais viram `REJECTED` e saem das
   tabelas de análise.
 - `discovery_hits`: qual query encontrou qual arquivo (procedência; `manual:add-repo` para adições
-  manuais).
+  manuais). `discovery_slices`: progresso da bisseção (`SPLIT`/`COLLECTED` por fatia) para retomar.
 - `artifacts` (repo, path, tool, kind, scope, skill_name, `exists_at_head`, `head_blob_sha`),
   `artifact_versions` (um blob por artefato; `content`, `is_symlink`, `content_omitted`) e
   `artifact_changes` (PK artifact+sha; A/M/D/T/R/C, `source_path` de renomeação/cópia, numstat,
@@ -97,8 +112,9 @@ Princípios que precisam ser mantidos:
 - `identities` (autor por repositório, com `.mailmap` do HEAD), `contributor_activity` (commits e
   arquivos por categoria no histórico inteiro) e `repository_activity` (commits/autores por mês).
 
-Enums são `VARCHAR + CHECK` (`native_enum=False`). Para adicionar um valor, basta uma migração
-normal. `tests/test_migrations.py` falha se a migração divergir dos modelos.
+Enums são `VARCHAR + CHECK` (`native_enum=False`). O autogenerate **não** detecta valores novos
+num enum: escreva a troca da constraint CHECK à mão, como em `0003`. `tests/test_migrations.py`
+falha se a migração divergir dos modelos.
 
 ## Estilo de código
 

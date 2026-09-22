@@ -1,0 +1,232 @@
+"""Rate-limit-aware access to the GitHub REST (code search) and GraphQL APIs.
+
+Every request goes through :meth:`GitHubClient._request`, which
+
+* spaces requests of the same bucket by a minimum interval (the code-search endpoint allows only
+  10 requests per minute; exceeding it trips GitHub's secondary rate limits / abuse detection),
+* tracks the remaining quota per bucket from the ``x-ratelimit-*`` response headers and sleeps
+  until the reset when it drops under the configured threshold,
+* retries rate-limit errors and transient 5xx responses with bounded exponential backoff
+  (``Retry-After`` is honoured), and fails loudly after ``GITHUB_MAX_RETRIES``.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from github import Auth, BadCredentialsException, Github, GithubException, GithubRetry
+
+from agm_miner.config import Settings
+
+logger = logging.getLogger(__name__)
+
+CODE_SEARCH = "code_search"
+GRAPHQL = "graphql"
+
+_MIN_INTERVAL_SECONDS = {CODE_SEARCH: 6.5, GRAPHQL: 1.0}
+_BACKOFF_BASE_SECONDS = 30.0
+_BACKOFF_MAX_SECONDS = 900.0
+_TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
+
+
+class GitHubAuthError(RuntimeError):
+    """The token is missing, invalid or lacks permissions."""
+
+
+class GitHubRequestError(RuntimeError):
+    """A request kept failing after all retries."""
+
+
+class Requester(Protocol):
+    def requestJsonAndCheck(  # noqa: N802 - PyGithub's name
+        self,
+        verb: str,
+        url: str,
+        parameters: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        input: Any | None = None,  # noqa: A002 - PyGithub's name
+    ) -> tuple[dict[str, Any], Any]: ...
+
+
+@dataclass(slots=True)
+class _BucketState:
+    remaining: int | None = None
+    reset_at: float | None = None  # epoch seconds
+    last_request: float | None = None  # monotonic seconds
+
+
+@dataclass(frozen=True, slots=True)
+class CodeSearchHit:
+    repo_id: int
+    node_id: str
+    full_name: str
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class CodeSearchPage:
+    total_count: int
+    incomplete_results: bool
+    hits: list[CodeSearchHit]
+
+
+class GitHubClient:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        requester: Requester | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._settings = settings
+        if requester is None:
+            if settings.github_token is None:
+                raise GitHubAuthError("GITHUB_TOKEN is not configured (see .env.sample).")
+            github = Github(
+                auth=Auth.Token(settings.github_token.get_secret_value()),
+                retry=GithubRetry(total=0),
+                seconds_between_requests=None,
+                timeout=60,
+            )
+            requester = github.requester
+        self._requester = requester
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._wall_clock = wall_clock
+        self._buckets: dict[str, _BucketState] = {}
+        self._thresholds = {
+            CODE_SEARCH: settings.search_rate_limit_min_remaining,
+            GRAPHQL: settings.graphql_rate_limit_min_remaining,
+        }
+
+    # ------------------------------------------------------------------ public API
+
+    def search_code(self, query: str, page: int, per_page: int = 100) -> CodeSearchPage:
+        """One page (1-based) of ``GET /search/code``."""
+        data = self._request(
+            CODE_SEARCH,
+            "GET",
+            "/search/code",
+            parameters={"q": query, "page": page, "per_page": per_page},
+        )
+        hits = [
+            CodeSearchHit(
+                repo_id=int(item["repository"]["id"]),
+                node_id=item["repository"]["node_id"],
+                full_name=item["repository"]["full_name"],
+                path=item["path"],
+            )
+            for item in data.get("items", [])
+        ]
+        return CodeSearchPage(
+            total_count=int(data.get("total_count", 0)),
+            incomplete_results=bool(data.get("incomplete_results", False)),
+            hits=hits,
+        )
+
+    def graphql(self, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Raw GraphQL response (``data`` and possibly partial ``errors``)."""
+        return self._request(
+            GRAPHQL, "POST", "/graphql", payload={"query": query, "variables": variables or {}}
+        )
+
+    # ------------------------------------------------------------------ plumbing
+
+    def _request(
+        self,
+        bucket: str,
+        verb: str,
+        url: str,
+        *,
+        parameters: dict[str, Any] | None = None,
+        payload: Any | None = None,
+    ) -> Any:
+        state = self._buckets.setdefault(bucket, _BucketState())
+        max_retries = self._settings.github_max_retries
+        for attempt in range(max_retries + 1):
+            self._pace(bucket, state)
+            try:
+                headers, data = self._requester.requestJsonAndCheck(
+                    verb, url, parameters=parameters, input=payload
+                )
+            except BadCredentialsException as exc:
+                raise GitHubAuthError("GitHub rejected the token (check GITHUB_TOKEN).") from exc
+            except GithubException as exc:
+                self._record_headers(state, exc.headers or {})
+                if attempt == max_retries or not self._is_retryable(exc):
+                    raise GitHubRequestError(
+                        f"{verb} {url} failed with status {exc.status}: {exc.data!r}"
+                    ) from exc
+                delay = self._retry_delay(exc, attempt)
+                logger.warning(
+                    "GitHub %s request failed with %s (attempt %s/%s); retrying in %.0fs",
+                    bucket,
+                    exc.status,
+                    attempt + 1,
+                    max_retries,
+                    delay,
+                )
+                self._sleep(delay)
+                continue
+            self._record_headers(state, headers)
+            return data
+        raise AssertionError("unreachable")
+
+    def _pace(self, bucket: str, state: _BucketState) -> None:
+        interval = _MIN_INTERVAL_SECONDS.get(bucket, 0.0)
+        if state.last_request is not None and interval:
+            wait = state.last_request + interval - self._monotonic()
+            if wait > 0:
+                self._sleep(wait)
+        threshold = self._thresholds.get(bucket, 0)
+        if (
+            state.remaining is not None
+            and state.reset_at is not None
+            and state.remaining <= threshold
+        ):
+            wait = (
+                state.reset_at - self._wall_clock() + self._settings.rate_limit_sleep_buffer_seconds
+            )
+            if wait > 0:
+                logger.warning(
+                    "GitHub %s quota low (%s left); sleeping %.0fs until reset",
+                    bucket,
+                    state.remaining,
+                    wait,
+                )
+                self._sleep(wait)
+            state.remaining = None
+        state.last_request = self._monotonic()
+
+    @staticmethod
+    def _record_headers(state: _BucketState, headers: dict[str, Any]) -> None:
+        lowered = {key.lower(): value for key, value in headers.items()}
+        if "x-ratelimit-remaining" in lowered:
+            state.remaining = int(lowered["x-ratelimit-remaining"])
+        if "x-ratelimit-reset" in lowered:
+            state.reset_at = float(lowered["x-ratelimit-reset"])
+
+    @staticmethod
+    def _is_retryable(exc: GithubException) -> bool:
+        if exc.status in _TRANSIENT_STATUSES or exc.status == 429:
+            return True
+        if exc.status == 403:
+            message = str(exc.data).lower()
+            headers = {key.lower() for key in (exc.headers or {})}
+            return "rate limit" in message or "abuse" in message or "retry-after" in headers
+        return False
+
+    def _retry_delay(self, exc: GithubException, attempt: int) -> float:
+        headers = {key.lower(): value for key, value in (exc.headers or {}).items()}
+        if "retry-after" in headers:
+            return float(headers["retry-after"]) + self._settings.rate_limit_sleep_buffer_seconds
+        if headers.get("x-ratelimit-remaining") == "0" and "x-ratelimit-reset" in headers:
+            wait = float(headers["x-ratelimit-reset"]) - self._wall_clock()
+            return max(wait, 0.0) + self._settings.rate_limit_sleep_buffer_seconds
+        return min(_BACKOFF_BASE_SECONDS * 2**attempt, _BACKOFF_MAX_SECONDS)

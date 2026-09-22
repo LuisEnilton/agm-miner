@@ -157,3 +157,21 @@ def test_explicit_size_qualifier_disables_bisection(session_factory) -> None:
     fake = FakeSearch([(1, 10, "CLAUDE.md")])
     discover_repositories(study(), session_factory, fake, queries=["filename:CLAUDE.md size:>5"])
     assert fake.queries == [("filename:CLAUDE.md size:>5", 1)]
+
+
+def test_loose_filename_matches_are_not_stored(session_factory) -> None:
+    """Observed: "filename:AGENTS.md" also returns files such as "..._LLM_Agents.md"."""
+    fake = FakeSearch(
+        [
+            (1, 10, "papers/Multi_LLM_Agents.md"),
+            (2, 20, "node_modules/pkg/AGENTS.md"),
+            (3, 30, "AGENTS.md"),
+            (3, 40, "docs/Agents.md"),  # nested artifact (names are case-insensitive)
+        ]
+    )
+    stats = discover_repositories(study(), session_factory, fake)
+    assert stats["hits"] == 4 and stats["artifact_hits"] == 2
+    assert stats["new_repositories"] == 1
+    with session_factory() as session:
+        assert session.scalars(select(Repository.id)).all() == [3]
+        assert sorted(session.scalars(select(DiscoveryHit.path))) == ["AGENTS.md", "docs/Agents.md"]

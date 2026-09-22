@@ -17,11 +17,13 @@ import logging
 import math
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
+from agm_miner.artifacts import classify_included
 from agm_miner.config import DiscoveryConfig, StudyConfig
 from agm_miner.database.models import (
     DiscoveryHit,
@@ -37,6 +39,15 @@ from agm_miner.runs import RunContext, exclusive_stage, track_run
 logger = logging.getLogger(__name__)
 
 _SIZE_QUALIFIER_RE = re.compile(r"(^|\s)size:\S+")
+
+
+@dataclass(frozen=True, slots=True)
+class _Search:
+    config: DiscoveryConfig
+    exclude_globs: tuple[str, ...]
+    session_factory: sessionmaker[Session]
+    client: GitHubClient
+    run: RunContext
 
 
 def discover_repositories(
@@ -59,75 +70,63 @@ def discover_repositories(
     ):
         if restart:
             _forget_progress(session_factory, selected_queries)
+        search = _Search(
+            config=study.discovery,
+            exclude_globs=tuple(study.mining.exclude_path_globs),
+            session_factory=session_factory,
+            client=client,
+            run=run,
+        )
         for query in selected_queries:
-            _discover_query(query, study.discovery, session_factory, client, run)
+            _discover_query(search, query)
         return dict(run.stats)
 
 
-def _discover_query(
-    query: str,
-    config: DiscoveryConfig,
-    session_factory: sessionmaker[Session],
-    client: GitHubClient,
-    run: RunContext,
-) -> None:
+def _discover_query(search: _Search, query: str) -> None:
     logger.info("Discovering with query %r", query)
-    run.increment("queries")
+    search.run.increment("queries")
     if _SIZE_QUALIFIER_RE.search(query):
         logger.warning("Query %r already has a size qualifier; size bisection disabled", query)
-        if _progress(session_factory, query) is SliceOutcome.COLLECTED:
-            run.increment("resumed_slices")
+        if _progress(search.session_factory, query) is SliceOutcome.COLLECTED:
+            search.run.increment("resumed_slices")
             return
-        _collect(query, query, config, session_factory, client, run)
+        _collect(search, query, query)
         return
-    _bisect(query, config.size_min, config.size_max, config, session_factory, client, run)
+    _bisect(search, query, search.config.size_min, search.config.size_max)
 
 
-def _bisect(
-    base_query: str,
-    low: int,
-    high: int,
-    config: DiscoveryConfig,
-    session_factory: sessionmaker[Session],
-    client: GitHubClient,
-    run: RunContext,
-) -> None:
+def _bisect(search: _Search, base_query: str, low: int, high: int) -> None:
     sliced = f"{base_query} size:{low}..{high}"
-    done = _progress(session_factory, sliced)
+    done = _progress(search.session_factory, sliced)
     if done is SliceOutcome.COLLECTED:
-        run.increment("resumed_slices")
+        search.run.increment("resumed_slices")
         return
     if done is SliceOutcome.SPLIT:
         middle = (low + high) // 2
-        _bisect(base_query, low, middle, config, session_factory, client, run)
-        _bisect(base_query, middle + 1, high, config, session_factory, client, run)
+        _bisect(search, base_query, low, middle)
+        _bisect(search, base_query, middle + 1, high)
         return
 
-    first = client.search_code(sliced, page=1, per_page=config.page_size)
-    run.increment("api_requests")
-    if first.total_count >= config.max_results_per_query and low < high:
+    first = search.client.search_code(sliced, page=1, per_page=search.config.page_size)
+    search.run.increment("api_requests")
+    if first.total_count >= search.config.max_results_per_query and low < high:
         middle = (low + high) // 2
         logger.info("Splitting %s (%s matches)", sliced, first.total_count)
-        run.increment("splits")
-        _record(session_factory, sliced, base_query, SliceOutcome.SPLIT, first.total_count, run)
-        _bisect(base_query, low, middle, config, session_factory, client, run)
-        _bisect(base_query, middle + 1, high, config, session_factory, client, run)
+        search.run.increment("splits")
+        _record(search, sliced, base_query, SliceOutcome.SPLIT, first.total_count)
+        _bisect(search, base_query, low, middle)
+        _bisect(search, base_query, middle + 1, high)
         return
-    _collect(base_query, sliced, config, session_factory, client, run, first_page=first)
+    _collect(search, base_query, sliced, first_page=first)
 
 
 def _collect(
-    base_query: str,
-    query: str,
-    config: DiscoveryConfig,
-    session_factory: sessionmaker[Session],
-    client: GitHubClient,
-    run: RunContext,
-    first_page: CodeSearchPage | None = None,
+    search: _Search, base_query: str, query: str, first_page: CodeSearchPage | None = None
 ) -> None:
+    config, run = search.config, search.run
     page = first_page
     if page is None:
-        page = client.search_code(query, page=1, per_page=config.page_size)
+        page = search.client.search_code(query, page=1, per_page=config.page_size)
         run.increment("api_requests")
     if page.total_count > config.max_results_per_query:
         # Only possible for a single-byte size slice or a user-provided size qualifier.
@@ -147,14 +146,14 @@ def _collect(
     while True:
         if page.incomplete_results:
             run.increment("incomplete_pages")
-        _store_hits(session_factory, base_query, page.hits, run)
+        _store_hits(search, base_query, page.hits)
         number += 1
         if number > pages or not page.hits:
             break
-        page = client.search_code(query, page=number, per_page=config.page_size)
+        page = search.client.search_code(query, page=number, per_page=config.page_size)
         run.increment("api_requests")
     # Recorded only after every page is stored: an interrupted slice is searched again.
-    _record(session_factory, query, base_query, SliceOutcome.COLLECTED, total, run)
+    _record(search, query, base_query, SliceOutcome.COLLECTED, total)
 
 
 def _progress(session_factory: sessionmaker[Session], slice_query: str) -> SliceOutcome | None:
@@ -165,22 +164,17 @@ def _progress(session_factory: sessionmaker[Session], slice_query: str) -> Slice
 
 
 def _record(
-    session_factory: sessionmaker[Session],
-    slice_query: str,
-    base_query: str,
-    outcome: SliceOutcome,
-    total_count: int,
-    run: RunContext,
+    search: _Search, slice_query: str, base_query: str, outcome: SliceOutcome, total_count: int
 ) -> None:
     values = {
         "slice_query": slice_query,
         "base_query": base_query,
         "outcome": outcome,
         "total_count": total_count,
-        "run_id": run.id,
+        "run_id": search.run.id,
     }
     statement = insert(DiscoverySlice).values(**values)
-    with session_factory() as session, session.begin():
+    with search.session_factory() as session, session.begin():
         session.execute(
             statement.on_conflict_do_update(
                 index_elements=[DiscoverySlice.slice_query],
@@ -199,12 +193,13 @@ def _forget_progress(session_factory: sessionmaker[Session], queries: Sequence[s
         session.execute(delete(DiscoverySlice).where(DiscoverySlice.base_query.in_(list(queries))))
 
 
-def _store_hits(
-    session_factory: sessionmaker[Session],
-    base_query: str,
-    hits: list[CodeSearchHit],
-    run: RunContext,
-) -> None:
+def _store_hits(search: _Search, base_query: str, hits: list[CodeSearchHit]) -> None:
+    run = search.run
+    run.increment("hits", len(hits))
+    # Code search matches file names loosely ("filename:AGENTS.md" also returns
+    # "LLM_Agents.md"); keep only paths that are artifacts under the study's rules.
+    hits = [hit for hit in hits if classify_included(hit.path, search.exclude_globs) is not None]
+    run.increment("artifact_hits", len(hits))
     if not hits:
         return
     repositories = {
@@ -225,7 +220,7 @@ def _store_hits(
         }
         for hit in hits
     }
-    with session_factory() as session, session.begin():
+    with search.session_factory() as session, session.begin():
         inserted = session.execute(
             insert(Repository)
             .values(list(repositories.values()))
@@ -241,5 +236,4 @@ def _store_hits(
         rows = [row for row in provenance.values() if row["repo_id"] in known]
         if rows:
             session.execute(insert(DiscoveryHit).values(rows).on_conflict_do_nothing())
-    run.increment("hits", len(hits))
     run.increment("new_repositories", len(inserted))

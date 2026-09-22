@@ -75,7 +75,8 @@ poetry run agm mine --repo openai/codex --repo anthropics/claude-code-action
 
 Os parâmetros metodológicos ficam em [study.yaml](study.yaml): queries, critérios de seleção,
 limites de mineração, padrões de bots e agentes, janela de pico. Mude os valores ali, não no
-código. **Antes da coleta final, fixe `selection.reference_date`**, senão o critério de atividade
+código. Depois de alterar os critérios, rode `agm select --reevaluate` para reaplicá-los a todos os
+repositórios, inclusive os já minerados. **Antes da coleta final, fixe `selection.reference_date`**, senão o critério de atividade
 depende da data em que o comando rodou.
 
 ## Testes

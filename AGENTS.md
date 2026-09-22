@@ -80,7 +80,11 @@ Princípios que precisam ser mantidos:
 - `pipeline_runs`: estágio, status, params, stats, `study_config` (JSONB), `code_version`.
 - `repositories`: id numérico do GitHub + `node_id` (GraphQL), metadados da seleção
   (`metadata_fetched_at`), status `DISCOVERED → SELECTED|REJECTED → MINED|FAILED` e
-  `rejection_reason` (primeiro critério que falhou).
+  `rejection_reason` (primeiro critério que falhou). A identidade é o `id`. O `full_name` **não é
+  único**, porque o GitHub pode reaproveitar o nome de um repositório renomeado ou apagado.
+  `agm select --reevaluate` aplica os critérios atuais a todos os repositórios: `MINED`/`FAILED` que
+  continuam qualificados mantêm o status, e os que não se qualificam mais viram `REJECTED` e saem das
+  tabelas de análise.
 - `discovery_hits`: qual query encontrou qual arquivo (procedência; `manual:add-repo` para adições
   manuais).
 - `artifacts` (repo, path, tool, kind, scope, skill_name, `exists_at_head`, `head_blob_sha`),
@@ -126,6 +130,11 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
 ## Limitações conhecidas (ameaças à validade)
 
 - A Code Search indexa só o branch default e arquivos menores que 384 KB, e não é determinística.
+  Há mais de 1000 `AGENTS.md` numa faixa de 20 bytes, então até fatias de 1 byte podem estourar o
+  limite. `unreachable_matches` nas estatísticas da execução mede quantos resultados ficaram
+  inacessíveis.
+- A REST devolve `node_id` legado (`MDEw...`) para repositórios antigos, e o GraphQL responde com o
+  id novo. `fetch_metadata` casa as respostas por posição e grava o id canônico.
   `stars:` não funciona nela, por isso o filtro de estrelas fica no estágio `select`.
 - As heurísticas de "tutorial/lista" (`exclude_keywords`), de bots, de agentes e dos papéis de
   autor precisam de validação manual numa amostra antes da coleta final.

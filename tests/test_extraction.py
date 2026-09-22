@@ -235,3 +235,21 @@ def test_git_version_requirement(monkeypatch) -> None:
     monkeypatch.setattr(repository, "git_version", lambda: (2, 30, 1))
     with pytest.raises(GitError, match="2.44"):
         repository.ensure_git_version()
+
+
+def test_artifact_introduced_only_by_a_merge_commit(repo_builder: RepoBuilder, tmp_path) -> None:
+    """Observed in HuggingAGI/HuggingArxivLLM: no non-merge commit touches the artifact."""
+    repo = repo_builder
+    repo.commit("Init", {"src/app.py": "x = 1\n"}, date=day(1))
+    repo.checkout("feature", create=True)
+    repo.commit("Feature", {"src/feature.py": "y = 2\n"}, date=day(2))
+    repo.checkout("main")
+    repo.merge("feature", files={"AGENTS.md": "# Agents\n"}, date=day(3))
+
+    clone = GitRepository.clone(repo.url, tmp_path / "clone", timeout_seconds=60)
+    result = extract_repository(clone, MiningConfig())
+    # The artifact exists at HEAD and its content is stored, but no change can be attributed
+    # to a non-merge commit (merges carry no diff).
+    assert result.artifacts["AGENTS.md"].exists_at_head
+    assert [v.content for v in result.versions] == ["# Agents\n"]
+    assert result.changes == [] and result.commits == []

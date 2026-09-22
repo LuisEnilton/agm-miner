@@ -130,6 +130,10 @@ class GitRepository:
         )
 
     def iter_full_commits(self, shas: Iterable[str]) -> Iterator[FullCommit]:
+        shas = list(shas)
+        if not shas:
+            # `git log --stdin` with no input falls back to HEAD.
+            return iter(())
         return parse_full_log(
             self.git.stream_tokens(
                 ["log", "-z", "--no-walk=unsorted", "--stdin", f"--format={FULL_LOG_FORMAT}"],
@@ -148,6 +152,9 @@ class GitRepository:
     ) -> Iterator[CommitDiff]:
         """``git diff-tree`` of each commit against its first parent (root commits against the
         empty tree). Needs the blobs of the compared files for rename detection and numstat."""
+        shas = list(shas)
+        if not shas:
+            return iter(())
         args = ["diff-tree", "--stdin", "-z", "--root", *_COMMON_DIFF_OPTIONS]
         args += ["-M", "-C"] if detect_renames else ["--no-renames"]
         if raw:

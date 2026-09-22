@@ -97,10 +97,18 @@ class RepoBuilder:
         self,
         branch: str,
         *,
+        files: dict[str, str | bytes | None] | None = None,
         author: tuple[str, str] = DEFAULT_AUTHOR,
         date: str = "2024-01-01T00:00:00+00:00",
     ) -> str:
-        self._git("merge", "-q", "--no-ff", "--no-edit", branch, env=self._env(author, date))
+        """Merge ``branch``; ``files`` are changed in the merge commit itself (an "evil" merge)."""
+        env = self._env(author, date)
+        if not files:
+            self._git("merge", "-q", "--no-ff", "--no-edit", branch, env=env)
+        else:
+            self._git("merge", "-q", "--no-ff", "--no-commit", branch, env=env)
+            self.write(files)
+            self._git("commit", "-q", "--no-edit", env=env)
         return self._git("rev-parse", "HEAD")
 
     def head(self) -> str:

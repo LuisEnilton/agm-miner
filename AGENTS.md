@@ -1,0 +1,142 @@
+# AGENTS.md — guia do `agm-miner` para agentes de código
+
+Pipeline de mineração (estudo MSR) de artefatos de configuração de agentes de IA no GitHub:
+`CLAUDE.md` / `CLAUDE.local.md`, `AGENTS.md` e `.claude/skills/**`. Ele coleta dados para
+responder às questões de pesquisa do estudo:
+
+| RQ | Pergunta | Tabelas gold que a respondem |
+|---|---|---|
+| RQ1 Conteúdo | Que categorias de instrução aparecem? | `rq1_sections` (seções H2/H3 do HEAD) |
+| RQ2 Estrutura | Hierarquia, extensão, legibilidade, frontmatter YAML das Skills | `rq2_structure` |
+| RQ3 Evolução | Frequência, o que muda, gatilhos, quem muda | `rq3_changes`, `rq3_author_roles` |
+| Correlação | Atributos dos artefatos × métricas do repositório | `repo_features` |
+
+Não há frontend nem API HTTP: tudo é executado pelo CLI `agm`.
+
+## Setup e comandos
+
+```bash
+cp .env.sample .env                 # GITHUB_TOKEN (discover/select/add-repo) e DATABASE_URL
+poetry env use /usr/bin/python3.11  # Python 3.11 obrigatório
+poetry install
+docker compose up -d db             # Postgres 15 em :5432
+poetry run alembic upgrade head
+
+poetry run agm discover             # 1. Code Search → repositories (DISCOVERED) + discovery_hits
+poetry run agm select               # 2. GraphQL → metadados + critérios → SELECTED/REJECTED
+poetry run agm add-repo owner/name  #    registra repositórios à mão (marcados como manual)
+poetry run agm mine --workers 4     # 3. clone git parcial → commits, versões, mudanças
+poetry run agm export               # 4. banco → data/bronze/<timestamp>/*.parquet + manifest.json
+poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silver + gold por RQ)
+poetry run agm runs list | funnel   # execuções registradas / funil de seleção
+
+poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
+poetry run ruff check . && poetry run ruff format .
+poetry run alembic revision --autogenerate -m "..."   # models.py é a fonte da verdade
+```
+
+`agm mine` aceita `--repo NAME` (ignora o status), `--retry-failed`, `--refresh` (minera de novo
+se o HEAD mudou), `--force` e `--keep-clones`.
+
+## Arquitetura
+
+```
+src/agm_miner/
+  cli.py              # comandos Typer; erros esperados viram mensagem de uma linha
+  config.py           # Settings (.env: infra/segredos) + StudyConfig (study.yaml: metodologia)
+  artifacts.py        # FONTE ÚNICA das regras de artefato (classify_path, GIT_PATHSPECS)
+  file_categories.py  # categoria de qualquer arquivo (code, test, docs, ci, agent_artifact, ...)
+  runs.py             # track_run(): toda execução vai para pipeline_runs (+ code_version)
+  extraction.py       # clone git → registros brutos (sem banco); os 8 passes estão na docstring
+  git/                # runner (subprocess -z, streaming, timeout), parsing (puro), repository
+  github/client.py    # REST code search + GraphQL, com pacing, quota por bucket e retry limitado
+  stages/             # discovery, selection, mining (persistência + concorrência), export
+  analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets
+  database/           # models.py (schema) e session.py (engine único por URL)
+```
+
+Princípios que precisam ser mantidos:
+
+1. **O minerador grava só fatos brutos**: metadados, commits, arquivos alterados e o conteúdo de
+   cada versão. Métricas (palavras, legibilidade, seções, diffs, papéis de autor, bots/agentes) são
+   calculadas em `analysis/` a partir do export bronze. **Não adicione colunas derivadas ao banco.**
+2. **Decisões metodológicas ficam no `study.yaml`**, não no código (critérios de seleção, limites,
+   padrões de bot/agente, janela de burst). Cada execução guarda um snapshot e o hash desse arquivo.
+3. **A análise não acessa o banco**: ela lê apenas `data/bronze/<export>/`, que é a unidade de
+   replicação. `analysis_manifest.json` registra o export de origem, a config e o `code_version`.
+4. **Mineração idempotente**: `persist_extraction` apaga e reinsere os dados do repositório numa
+   única transação. Cada repositório é protegido por `pg_try_advisory_lock(repo_id)`. Erros viram
+   `FAILED` + `last_error` + `attempts`.
+5. **O git roda isolado**: `GIT_CONFIG_GLOBAL=/dev/null`, saída `-z`, `LC_ALL=C`. Nunca faça parse
+   de saída sem `-z`.
+6. **Clone parcial (`--filter=blob:none`)**: o histórico completo (`--raw --no-renames`) não
+   precisa de blobs. Os blobs de artefatos são baixados em lote (`prefetch_blobs`); não dispare lazy
+   fetch objeto por objeto. Renomeação/cópia (`-M -C`) só roda nos commits que adicionaram artefatos.
+7. **Pacing da API do GitHub**: toda chamada passa por `GitHubClient._request` (intervalo mínimo
+   de 6,5s na code search, quota lida dos headers, retry com limite). Não chame o PyGithub direto.
+
+## Modelo de dados ([database/models.py](src/agm_miner/database/models.py))
+
+- `pipeline_runs`: estágio, status, params, stats, `study_config` (JSONB), `code_version`.
+- `repositories`: id numérico do GitHub + `node_id` (GraphQL), metadados da seleção
+  (`metadata_fetched_at`), status `DISCOVERED → SELECTED|REJECTED → MINED|FAILED` e
+  `rejection_reason` (primeiro critério que falhou).
+- `discovery_hits`: qual query encontrou qual arquivo (procedência; `manual:add-repo` para adições
+  manuais).
+- `artifacts` (repo, path, tool, kind, scope, skill_name, `exists_at_head`, `head_blob_sha`),
+  `artifact_versions` (um blob por artefato; `content`, `is_symlink`, `content_omitted`) e
+  `artifact_changes` (PK artifact+sha; A/M/D/T/R/C, `source_path` de renomeação/cópia, numstat,
+  blob antes/depois).
+- `commits` (só commits não-merge que tocaram artefatos; PK `(repo_id, sha)`),
+  `commit_files` (todos os arquivos desses commits, com categoria; sem detecção de renomeação),
+  `commit_coauthors` (trailers `Co-authored-by`).
+- `identities` (autor por repositório, com `.mailmap` do HEAD), `contributor_activity` (commits e
+  arquivos por categoria no histórico inteiro) e `repository_activity` (commits/autores por mês).
+
+Enums são `VARCHAR + CHECK` (`native_enum=False`). Para adicionar um valor, basta uma migração
+normal. `tests/test_migrations.py` falha se a migração divergir dos modelos.
+
+## Estilo de código
+
+- Python 3.11, `from __future__ import annotations`, type hints completos, `StrEnum`,
+  `@dataclass(frozen=True, slots=True)` para registros.
+- Funções puras separadas de I/O (`git/parsing.py`, `analysis/*`, `selection.evaluate`), para
+  poderem ser testadas sem rede nem banco.
+- Dependências injetáveis: `session_factory`, `client`, `clone_url`, e `sleep`/`clock` no cliente
+  GitHub.
+- Logging com `logger = logging.getLogger(__name__)` e argumentos `%s`. Sem `print` fora do CLI.
+- Helpers privados com `_`; constantes em `UPPER_SNAKE`; linhas de até 100 colunas; Ruff com
+  `E,F,I,B,UP,SIM`.
+- Código, docstrings e logs em inglês; documentação do projeto em português.
+- Commits no padrão Conventional Commits, em inglês.
+
+## Testes
+
+Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver servidor) e `git`.
+
+- `tests/gitrepo.py::RepoBuilder` cria repositórios git determinísticos (autor, data, merge,
+  symlink, renomeação). O minerador os clona via `file://` com filtro de blobs, o mesmo caminho da
+  produção.
+- `tests/db_fixtures.py` recria o schema com `alembic upgrade head` a cada sessão e trunca as
+  tabelas entre testes.
+- Clientes GitHub falsos (`FakeRequester`, `FakeSearch`, `FakeGraphQL`) simulam paginação, o limite
+  de 1000 resultados, 403/429/5xx e `NOT_FOUND`.
+- `tests/test_end_to_end.py` roda minerar → exportar → analisar e verifica as tabelas gold.
+
+## Limitações conhecidas (ameaças à validade)
+
+- A Code Search indexa só o branch default e arquivos menores que 384 KB, e não é determinística.
+  `stars:` não funciona nela, por isso o filtro de estrelas fica no estágio `select`.
+- As heurísticas de "tutorial/lista" (`exclude_keywords`), de bots, de agentes e dos papéis de
+  autor precisam de validação manual numa amostra antes da coleta final.
+- `hours_since_previous_change` usa a data de autoria (rebases podem distorcer). Flesch só é
+  calculado para textos detectados como inglês, e listas sem pontuação distorcem o índice.
+- `reference_date` no `study.yaml` precisa ser fixada antes da coleta final.
+
+## Como estender
+
+- **Nova ferramenta (ex.: `GEMINI.md`)**: adicione o valor em `ArtifactTool`, trate em
+  `classify_path`, inclua o pathspec em `GIT_PATHSPECS` e a query em `study.yaml`, e gere uma
+  migração (a constraint CHECK muda). Cubra com casos em `tests/test_artifacts.py`.
+- **Nova métrica**: implemente em `analysis/` e acrescente ao schema da tabela silver/gold
+  correspondente. Não mexa no minerador.

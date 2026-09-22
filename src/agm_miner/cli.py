@@ -6,6 +6,7 @@ agm add-repo NAME...    register repositories by name (validation runs)
 agm mine                mine selected repositories from git clones (stage 3)
 agm export              dump the database as a bronze Parquet dataset (stage 4)
 agm analyze             build silver/gold analysis datasets from a bronze export (stage 5)
+agm run                 run stages 1-3 in parallel until done, then 4 and 5
 agm runs list|funnel    inspect pipeline runs and the selection funnel
 """
 
@@ -237,6 +238,60 @@ def analyze(
     bronze_dir = bronze or latest_export(settings.bronze_dir)
     output_dir = output or settings.gold_dir / bronze_dir.name
     _print({"output": str(output_dir), **build_datasets(bronze_dir, output_dir, study.analysis)})
+
+
+@app.command()
+@_handle_errors
+def run(
+    workers: Annotated[int, typer.Option(min=1, help="Parallel workers of each mine run.")] = 4,
+    discover: Annotated[
+        bool, typer.Option(help="Run discovery (--no-discover only drains the backlog).")
+    ] = True,
+    query: Annotated[
+        list[str] | None, typer.Option("--query", "-q", help="Override the study's queries.")
+    ] = None,
+    export: Annotated[bool, typer.Option(help="Export when collection finishes.")] = True,
+    analyze: Annotated[
+        bool, typer.Option(help="Analyze the new export (skipped with --no-export).")
+    ] = True,
+    select_interval: Annotated[
+        float, typer.Option(min=0, help="Minimum seconds between two select runs.")
+    ] = 60.0,
+    mine_interval: Annotated[
+        float, typer.Option(min=0, help="Minimum seconds between two mine runs.")
+    ] = 60.0,
+    status_interval: Annotated[
+        float, typer.Option(min=1, help="Seconds between progress lines.")
+    ] = 60.0,
+    study_path: StudyOption = None,
+) -> None:
+    """Run discover, select and mine in parallel until done, then export and analyze."""
+    from agm_miner.orchestrator import PipelineOptions, run_pipeline
+
+    settings, _ = _context(study_path)
+    options = PipelineOptions(
+        workers=workers,
+        discover=discover,
+        export=export,
+        analyze=analyze,
+        select_interval=select_interval,
+        mine_interval=mine_interval,
+        status_interval=status_interval,
+        study_path=study_path,
+        queries=tuple(query or ()),
+    )
+    result = run_pipeline(get_session_factory(settings.database_url), options)
+    _print(
+        {
+            "exit_code": result.exit_code,
+            "failed_stage": result.failed_stage,
+            "interrupted": result.interrupted,
+            "stages": [f"{stage}:{code}" for stage, code in result.stages],
+            "repositories": result.final_counts,
+        }
+    )
+    if result.exit_code:
+        raise typer.Exit(code=result.exit_code)
 
 
 @runs_app.command("list")

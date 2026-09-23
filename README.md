@@ -357,6 +357,9 @@ analysis:
 
 - **`min_artifact_bytes`**: tamanho mínimo, em bytes, da última versão de um arquivo de
   instrução (`CLAUDE.md`, `AGENTS.md`) ou de um `SKILL.md`. Com `0`, todos os artefatos entram.
+  Os demais arquivos de uma skill entram quando o `SKILL.md` da **mesma pasta** entra; duas skills
+  com o mesmo nome em pastas diferentes (por exemplo, pacotes de um monorepo) são tratadas
+  separadamente.
   Se você **diminuir** esse valor, diminua também `discovery.size_min`, senão a busca não encontra
   os arquivos menores.
 - **`min_human_contributors`**: mínimo de autores humanos no histórico inteiro do repositório.

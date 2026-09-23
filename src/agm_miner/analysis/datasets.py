@@ -210,6 +210,9 @@ def head_versions(tables: dict[str, pl.DataFrame]) -> pl.DataFrame:
 _SIZED_KINDS = (ArtifactKind.INSTRUCTION.value, ArtifactKind.SKILL_MANIFEST.value)
 # Contributors of ``rq3_author_roles`` that are people: neither bots nor coding agents.
 _HUMAN = ~pl.col("is_bot") & pl.col("agent").is_null()
+# The directory of the skill an artifact belongs to (``[<dir>/].claude/skills/<name>``). It
+# identifies a skill: ``skill_name`` alone repeats across packages of a monorepo.
+SKILL_DIR = pl.col("path").str.extract(r"^((?:.*/)?\.claude/skills/[^/]+)/", 1)
 
 
 def latest_versions(tables: dict[str, pl.DataFrame]) -> pl.DataFrame:
@@ -248,22 +251,23 @@ def build_artifact_sample(tables: dict[str, pl.DataFrame], config: AnalysisConfi
 
     Instruction files and skill manifests need ``min_artifact_bytes`` in their latest version
     (a symlink never qualifies by itself; its target is an artifact of its own). Skill resources
-    follow the manifest of their skill.
+    follow the manifest in their own skill directory.
     """
     latest = latest_versions(tables).with_columns(
+        SKILL_DIR.alias("skill_dir"),
         (
             pl.col("kind").is_in(_SIZED_KINDS)
             & ~pl.col("is_symlink").fill_null(True)
             & (pl.col("size_bytes").fill_null(0) >= config.min_artifact_bytes)
-        ).alias("meets_min_size")
+        ).alias("meets_min_size"),
     )
     skills = (
         latest.filter(pl.col("kind") == ArtifactKind.SKILL_MANIFEST.value)
-        .group_by("repo_id", "skill_name")
+        .group_by("repo_id", "skill_dir")
         .agg(pl.col("meets_min_size").any().alias("skill_in_sample"))
     )
     return (
-        latest.join(skills, on=["repo_id", "skill_name"], how="left")
+        latest.join(skills, on=["repo_id", "skill_dir"], how="left")
         .with_columns(
             pl.when(pl.col("kind") == ArtifactKind.SKILL_RESOURCE.value)
             .then(pl.col("skill_in_sample").fill_null(False))
@@ -567,7 +571,7 @@ def build_repo_features(
         (instruction & (pl.col("tool") == ArtifactTool.AGENTS.value)).any().alias("has_agents_md"),
         instruction.sum().alias("instruction_files"),
         (instruction & (pl.col("scope") == "NESTED")).sum().alias("nested_instruction_files"),
-        pl.col("skill_name").filter(pl.col("skill_name").is_not_null()).n_unique().alias("skills"),
+        SKILL_DIR.drop_nulls().n_unique().alias("skills"),
         (pl.col("kind") != ArtifactKind.INSTRUCTION.value).sum().alias("skill_files"),
         pl.col("words").filter(instruction).sum().alias("instruction_words"),
         pl.col("flesch_reading_ease").filter(instruction).mean().alias("instruction_reading_ease"),

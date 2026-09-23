@@ -3,10 +3,14 @@
 Role definitions (thresholds in ``StudyConfig.analysis``), computed from the share of an
 identity's file changes per category over the repository's whole history:
 
+* ``agent``         — name/e-mail matches a coding agent pattern (takes precedence over ``bot``:
+  identities such as ``claude[bot]`` match both);
 * ``bot``           — name/e-mail matches a bot pattern;
 * ``docs_focused``  — docs + agent artifacts + agent config >= ``docs_focused_min_share``;
 * ``code_focused``  — code + tests >= ``code_focused_min_share``;
 * ``mixed``         — everything else.
+
+Only ``docs_focused``, ``code_focused`` and ``mixed`` identities are human contributors.
 """
 
 from __future__ import annotations
@@ -54,7 +58,11 @@ def category_shares(file_changes: Mapping[str, int]) -> dict[str, float]:
     return {category: count / total for category, count in file_changes.items()}
 
 
-def author_role(shares: Mapping[str, float], bot: bool, config: AnalysisConfig) -> str:
+def author_role(
+    shares: Mapping[str, float], bot: bool, config: AnalysisConfig, *, agent: str | None = None
+) -> str:
+    if agent is not None:
+        return "agent"
     if bot:
         return "bot"
     docs = sum(shares.get(category.value, 0.0) for category in DOC_CATEGORIES)

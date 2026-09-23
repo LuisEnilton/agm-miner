@@ -250,7 +250,7 @@ Aplicados em ordem; o primeiro que falha é o motivo gravado.
 | Último commit do branch default | até 365 dias antes de `reference_date` | select | `inactive` |
 | Nome, descrição ou tópicos sem palavras de tutorial/lista | `exclude_keywords` | select | `keyword:<palavra>` |
 | Arquivo de instrução ou `SKILL.md` com tamanho mínimo (última versão, sem symlinks) | ≥ 2048 bytes | analyze | `min_artifact_bytes` |
-| Autores humanos (sem bots) no histórico inteiro | ≥ 2 | analyze | `min_human_contributors` |
+| Autores humanos (sem bots nem agentes de código) no histórico inteiro | ≥ 2 | analyze | `min_human_contributors` |
 
 Origem das escolhas:
 - as licenças OSI, os ≥ 2 contribuidores, a atividade medida por commits (e não por push) e a
@@ -359,9 +359,11 @@ analysis:
   instrução (`CLAUDE.md`, `AGENTS.md`) ou de um `SKILL.md`. Com `0`, todos os artefatos entram.
   Se você **diminuir** esse valor, diminua também `discovery.size_min`, senão a busca não encontra
   os arquivos menores.
-- **`min_human_contributors`**: mínimo de autores humanos (bots não contam) no histórico inteiro do
-  repositório. Com `1`, o critério deixa de excluir repositórios. Os bots são reconhecidos por
-  `analysis.bot_patterns`.
+- **`min_human_contributors`**: mínimo de autores humanos no histórico inteiro do repositório.
+  Bots (`analysis.bot_patterns`) e agentes de código que aparecem como autores dos commits
+  (`analysis.agent_patterns`, por exemplo `Claude <noreply@anthropic.com>`) não contam. Em
+  `rq3_author_roles`, os agentes recebem o papel `agent`, e `repo_features.contributors` também só
+  conta humanos. Com `1`, o critério só exclui repositórios sem nenhum autor humano.
 
 Como esses dois critérios são aplicados na análise, dá para medir o efeito de outro limite
 (análise de sensibilidade) rodando `agm analyze --study outro.yaml --output <outra pasta>`

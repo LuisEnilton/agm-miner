@@ -144,8 +144,14 @@ def test_artifact_size_rules() -> None:
     }
 
 
-def roles(*rows: tuple[int, bool, int]) -> pl.DataFrame:
-    return pl.DataFrame(rows, schema=["repo_id", "is_bot", "commits"], orient="row")
+def roles(*rows: tuple) -> pl.DataFrame:
+    """Rows of (repo_id, is_bot, commits) or (repo_id, is_bot, commits, agent)."""
+    padded = [row if len(row) == 4 else (*row, None) for row in rows]
+    return pl.DataFrame(
+        padded,
+        schema={"repo_id": pl.Int64, "is_bot": pl.Boolean, "commits": pl.Int64, "agent": pl.Utf8},
+        orient="row",
+    )
 
 
 def test_repository_sample_reasons() -> None:
@@ -172,3 +178,18 @@ def test_repository_sample_reasons() -> None:
     repositories = build_repository_sample(data, artifacts, people, CONFIG)
     assert repositories.filter(pl.col("in_sample"))["repo_id"].to_list() == [1]
     assert sample_artifact_ids(artifacts, repositories)["artifact_id"].to_list() == [1]
+
+
+def test_coding_agents_are_not_human_contributors() -> None:
+    data = tables([artifact(1, "AGENTS.md")], [version(1, 1, BIG)], [])
+    artifacts = build_artifact_sample(data, CONFIG)
+
+    # A solo developer whose commits are partly authored by Claude is still a solo developer.
+    solo = roles((1, False, 5), (1, False, 12, "claude"))
+    row = build_repository_sample(data, artifacts, solo, CONFIG).row(0, named=True)
+    assert row["human_contributors"] == 1
+    assert row["exclusion_reason"] == "min_human_contributors"
+
+    team = roles((1, False, 5), (1, False, 2), (1, False, 12, "claude"))
+    row = build_repository_sample(data, artifacts, team, CONFIG).row(0, named=True)
+    assert row["human_contributors"] == 2 and row["in_sample"]

@@ -51,6 +51,9 @@ def test_roles() -> None:
     assert role({"code": 5, "test": 2, "docs": 3}) == "code_focused"
     assert role({"code": 3, "docs": 3, "ci": 4}) == "mixed"
     assert author_role({}, True, CONFIG) == "bot"
+    # Coding agents are not people, whatever files they change; "claude[bot]" is also a bot.
+    assert author_role(category_shares({"code": 9}), False, CONFIG, agent="claude") == "agent"
+    assert author_role({}, True, CONFIG, agent="claude") == "agent"
     assert category_shares({}) == {}
 
 

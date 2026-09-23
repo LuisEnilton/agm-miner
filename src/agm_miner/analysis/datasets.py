@@ -208,6 +208,8 @@ def head_versions(tables: dict[str, pl.DataFrame]) -> pl.DataFrame:
 
 
 _SIZED_KINDS = (ArtifactKind.INSTRUCTION.value, ArtifactKind.SKILL_MANIFEST.value)
+# Contributors of ``rq3_author_roles`` that are people: neither bots nor coding agents.
+_HUMAN = ~pl.col("is_bot") & pl.col("agent").is_null()
 
 
 def latest_versions(tables: dict[str, pl.DataFrame]) -> pl.DataFrame:
@@ -285,7 +287,7 @@ def build_repository_sample(
         (pl.col("in_sample") & pl.col("kind").is_in(_SIZED_KINDS)).sum().alias("sample_artifacts")
     )
     humans = (
-        roles.filter(~pl.col("is_bot") & (pl.col("commits") > 0))
+        roles.filter(_HUMAN & (pl.col("commits") > 0))
         .group_by("repo_id")
         .agg(pl.len().alias("human_contributors"))
     )
@@ -354,6 +356,7 @@ def build_author_roles(tables: dict[str, pl.DataFrame], config: AnalysisConfig) 
         file_changes = changes_by_identity.get(identity["id"], {})
         shares = category_shares(file_changes)
         bot = is_bot(identity["name"], identity["email"], config)
+        agent = detect_agent(identity["name"], identity["email"], config)
         rows.append(
             {
                 "identity_id": identity["id"],
@@ -363,8 +366,8 @@ def build_author_roles(tables: dict[str, pl.DataFrame], config: AnalysisConfig) 
                 "commits": identity["commits"],
                 "artifact_commits": artifact_commit_count.get(identity["id"], 0),
                 "is_bot": bot,
-                "agent": detect_agent(identity["name"], identity["email"], config),
-                "role": author_role(shares, bot, config),
+                "agent": agent,
+                "role": author_role(shares, bot, config, agent=agent),
                 "file_changes": sum(file_changes.values()),
                 **{
                     f"share_{category.value}": shares.get(category.value, 0.0)
@@ -579,7 +582,7 @@ def build_repo_features(
     )
     people = roles.group_by("repo_id").agg(
         pl.col("commits").sum().alias("total_commits"),
-        (~pl.col("is_bot")).sum().alias("contributors"),
+        _HUMAN.sum().alias("contributors"),
         pl.col("artifact_commits").gt(0).sum().alias("artifact_authors"),
     )
     active_months = (

@@ -203,6 +203,8 @@ class Repository(Base):
     is_template: Mapped[bool | None] = mapped_column(Boolean)
     is_mirror: Mapped[bool | None] = mapped_column(Boolean)
     commits_count: Mapped[int | None] = mapped_column(Integer)
+    # Commit date of the default branch head (the activity criterion).
+    last_commit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Mining bookkeeping.
     mined_head_sha: Mapped[str | None] = mapped_column(String(64))

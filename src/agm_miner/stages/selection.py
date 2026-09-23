@@ -47,7 +47,10 @@ REPOSITORY_FIELDS = """
   primaryLanguage { name }
   licenseInfo { spdxId }
   repositoryTopics(first: 20) { nodes { topic { name } } }
-  defaultBranchRef { name target { ... on Commit { history { totalCount } } } }
+  defaultBranchRef {
+    name
+    target { ... on Commit { committedDate history { totalCount } } }
+  }
 """
 
 NODES_QUERY = (
@@ -81,11 +84,13 @@ class RepositoryMetadata:
     is_empty: bool
     default_branch: str | None
     commits_count: int | None
+    last_commit_at: datetime | None
 
     @classmethod
     def from_graphql(cls, node: dict[str, Any]) -> RepositoryMetadata:
         branch = node.get("defaultBranchRef") or {}
-        history = ((branch.get("target") or {}).get("history")) or {}
+        target = branch.get("target") or {}
+        history = target.get("history") or {}
         return cls(
             database_id=int(node["databaseId"]),
             node_id=node["id"],
@@ -110,6 +115,7 @@ class RepositoryMetadata:
             is_empty=bool(node["isEmpty"]),
             default_branch=branch.get("name"),
             commits_count=history.get("totalCount"),
+            last_commit_at=_timestamp(target.get("committedDate")),
         )
 
     def as_columns(self) -> dict[str, Any]:
@@ -131,6 +137,7 @@ class RepositoryMetadata:
             "is_template": self.is_template,
             "is_mirror": self.is_mirror,
             "commits_count": self.commits_count,
+            "last_commit_at": self.last_commit_at,
         }
 
 
@@ -170,13 +177,27 @@ def evaluate(metadata: RepositoryMetadata, config: SelectionConfig, reference: d
         return "mirror"
     if config.exclude_templates and metadata.is_template:
         return "template"
+    if (
+        config.created_before is not None
+        and metadata.created_at.astimezone(UTC).date() >= config.created_before
+    ):
+        return "created_after_cutoff"
+    if config.allowed_licenses is not None:
+        allowed = {spdx.lower() for spdx in config.allowed_licenses}
+        if metadata.license_spdx is None or metadata.license_spdx.lower() not in allowed:
+            return "license"
+    if config.require_code_language:
+        non_code = {language.lower() for language in config.non_code_languages}
+        if metadata.primary_language is None or metadata.primary_language.lower() in non_code:
+            return "no_code_language"
     if metadata.stars < config.min_stars:
         return "min_stars"
     if metadata.commits_count is not None and metadata.commits_count < config.min_commits:
         return "min_commits"
     if config.active_within_days is not None:
         cutoff = reference - timedelta(days=config.active_within_days)
-        if metadata.pushed_at is None or metadata.pushed_at.astimezone(UTC).date() < cutoff:
+        last_commit = metadata.last_commit_at
+        if last_commit is None or last_commit.astimezone(UTC).date() < cutoff:
             return "inactive"
     name = metadata.full_name.split("/", 1)[-1]
     words = _words(name, metadata.description, *metadata.topics)

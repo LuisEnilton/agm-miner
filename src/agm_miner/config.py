@@ -84,14 +84,72 @@ class SelectionConfig(_StrictModel):
     exclude_archived: bool = True
     exclude_templates: bool = True
     exclude_mirrors: bool = True
-    # A repository is considered active when it had a push within this many days before
-    # ``reference_date``. ``None`` disables the criterion.
+    # Only repositories created before this date: the artifacts are then additions to existing
+    # projects rather than projects built around the agent tools. ``None`` disables the criterion.
+    created_before: date | None = date(2024, 1, 1)
+    # SPDX ids of the accepted licenses (case-insensitive); ``None`` accepts any repository,
+    # even unlicensed ones. The default is the OSI-approved licenses GitHub detects.
+    allowed_licenses: list[str] | None = Field(
+        default_factory=lambda: [
+            "0BSD",
+            "AFL-3.0",
+            "AGPL-3.0",
+            "Apache-2.0",
+            "Artistic-2.0",
+            "BSD-2-Clause",
+            "BSD-2-Clause-Patent",
+            "BSD-3-Clause",
+            "BSL-1.0",
+            "CECILL-2.1",
+            "ECL-2.0",
+            "EPL-1.0",
+            "EPL-2.0",
+            "EUPL-1.1",
+            "EUPL-1.2",
+            "GPL-2.0",
+            "GPL-3.0",
+            "ISC",
+            "LGPL-2.1",
+            "LGPL-3.0",
+            "LPPL-1.3c",
+            "MIT",
+            "MIT-0",
+            "MPL-2.0",
+            "MS-PL",
+            "MS-RL",
+            "MulanPSL-2.0",
+            "NCSA",
+            "OFL-1.1",
+            "OSL-3.0",
+            "PostgreSQL",
+            "UPL-1.0",
+            "Unlicense",
+            "Zlib",
+        ]
+    )
+    # A software repository has a programming language as its primary language (GitHub
+    # Linguist); these markup/prose languages do not count. Disabled with ``False``.
+    require_code_language: bool = True
+    non_code_languages: list[str] = Field(
+        default_factory=lambda: [
+            "Markdown",
+            "MDX",
+            "HTML",
+            "reStructuredText",
+            "AsciiDoc",
+            "Text",
+        ]
+    )
+    # A repository is considered active when the latest commit of its default branch is at most
+    # this many days older than ``reference_date``. ``None`` disables the criterion.
     active_within_days: int | None = 365
     # Fixed so that re-running selection later yields the same result. Defaults to the run date
     # when omitted (the effective value is stored in the run record).
     reference_date: date | None = None
     # Case-insensitive whole-word matches (singular and plural) against name, description and
-    # topics flag tutorials, curated lists and similar non-product repositories.
+    # topics flag tutorials, curated lists and similar non-product repositories. Ambiguous words
+    # ("example", "template", "prompt") are left out: they reject real software ("a template
+    # engine", "prompt toolkit"); GitHub template repositories are covered by exclude_templates.
     exclude_keywords: list[str] = Field(
         default_factory=lambda: [
             "awesome",
@@ -99,11 +157,8 @@ class SelectionConfig(_StrictModel):
             "course",
             "boilerplate",
             "cheatsheet",
-            "example",
             "starter",
-            "template",
             "dotfiles",
-            "prompt",
         ]
     )
     graphql_batch_size: int = 25
@@ -135,6 +190,13 @@ class AnalysisConfig(_StrictModel):
     burst_window_hours: int = 24
     # Minimum prose characters needed to trust language detection / readability.
     min_chars_for_language: int = 200
+    # Study sample (applied to the mined data, see analysis/datasets.py):
+    # an instruction file or skill manifest belongs to the sample when its latest version has
+    # at least this many bytes (symlinks never do: their target is an artifact of its own) ...
+    min_artifact_bytes: int = 2048
+    # ... and a repository when it has one such artifact and this many human (non-bot)
+    # authors in its whole history.
+    min_human_contributors: int = 2
     # Author role thresholds, expressed as share of the author's file changes.
     docs_focused_min_share: float = 0.8
     code_focused_min_share: float = 0.5

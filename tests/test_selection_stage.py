@@ -42,7 +42,10 @@ def node(repo_id: int, **overrides: Any) -> dict[str, Any]:
         "primaryLanguage": {"name": "Python"},
         "licenseInfo": {"spdxId": "MIT"},
         "repositoryTopics": {"nodes": [{"topic": {"name": "web"}}]},
-        "defaultBranchRef": {"name": "main", "target": {"history": {"totalCount": 340}}},
+        "defaultBranchRef": {
+            "name": "main",
+            "target": {"committedDate": "2026-05-19T00:00:00Z", "history": {"totalCount": 340}},
+        },
     }
     base.update(overrides)
     return base
@@ -59,6 +62,7 @@ def test_metadata_parsing() -> None:
     assert parsed.topics == ("web",)
     assert parsed.commits_count == 340 and parsed.default_branch == "main"
     assert parsed.license_spdx == "MIT"
+    assert parsed.last_commit_at == datetime(2026, 5, 19, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -71,18 +75,43 @@ def test_metadata_parsing() -> None:
         ({"isArchived": True}, "archived"),
         ({"isMirror": True}, "mirror"),
         ({"isTemplate": True}, "template"),
+        ({"createdAt": "2024-01-01T00:00:00Z"}, "created_after_cutoff"),
+        ({"createdAt": "2023-12-31T23:59:59Z"}, None),
+        ({"licenseInfo": None}, "license"),
+        ({"licenseInfo": {"spdxId": "NOASSERTION"}}, "license"),
+        ({"licenseInfo": {"spdxId": "CC-BY-4.0"}}, "license"),  # not an OSI license
+        ({"licenseInfo": {"spdxId": "apache-2.0"}}, None),  # SPDX ids are case-insensitive
+        ({"primaryLanguage": None}, "no_code_language"),
+        ({"primaryLanguage": {"name": "HTML"}}, "no_code_language"),
+        ({"primaryLanguage": {"name": "Markdown"}}, "no_code_language"),
+        ({"primaryLanguage": {"name": "Rust"}}, None),
         ({"stargazerCount": 49}, "min_stars"),
         (
             {"defaultBranchRef": {"name": "main", "target": {"history": {"totalCount": 3}}}},
             "min_commits",
         ),
-        ({"pushedAt": "2025-05-01T00:00:00Z"}, "inactive"),
+        # Activity is the latest commit of the default branch, not a push to any branch.
+        (
+            {
+                "pushedAt": "2026-05-30T00:00:00Z",
+                "defaultBranchRef": {
+                    "name": "main",
+                    "target": {
+                        "committedDate": "2025-05-01T00:00:00Z",
+                        "history": {"totalCount": 340},
+                    },
+                },
+            },
+            "inactive",
+        ),
         ({"nameWithOwner": "org/awesome-claude-code"}, "keyword:awesome"),
         ({"description": "A tutorial on agents"}, "keyword:tutorial"),
-        # Singular and plural forms match the same keyword (observed: "mern-stack-example").
-        ({"nameWithOwner": "org/mern-stack-example"}, "keyword:example"),
+        # Singular and plural forms match the same keyword.
+        ({"nameWithOwner": "org/react-starters"}, "keyword:starter"),
         ({"description": "Tutorials for agents"}, "keyword:tutorial"),
-        ({"description": "Collection of useful prompts"}, "keyword:prompt"),
+        # Ambiguous words are not keywords: they would reject real software.
+        ({"description": "A template engine, for example"}, None),
+        ({"description": "Collection of useful prompts"}, None),
         # Words ending in "ss" are not plurals.
         ({"description": "Process manager"}, None),
         (
@@ -101,7 +130,18 @@ def test_evaluate(overrides: dict[str, Any], reason: str | None) -> None:
 
 def test_activity_criterion_can_be_disabled() -> None:
     config = SelectionConfig(active_within_days=None)
-    assert evaluate(metadata(pushedAt="2019-01-01T00:00:00Z"), config, REFERENCE) is None
+    old = {"name": "main", "target": {"committedDate": "2019-01-01T00:00:00Z"}}
+    assert evaluate(metadata(defaultBranchRef=old), config, REFERENCE) is None
+
+
+def test_new_criteria_can_be_disabled() -> None:
+    config = SelectionConfig(
+        created_before=None, allowed_licenses=None, require_code_language=False
+    )
+    repository = metadata(
+        createdAt="2026-01-01T00:00:00Z", licenseInfo=None, primaryLanguage={"name": "HTML"}
+    )
+    assert evaluate(repository, config, REFERENCE) is None
 
 
 class FakeGraphQL:
@@ -262,7 +302,7 @@ def test_reevaluation_covers_mined_repositories(session_factory) -> None:
             Repository(id=3, node_id="R_3", full_name="org/repo3", status=RepositoryStatus.FAILED)
         )
     fake = FakeGraphQL(
-        {"R_1": node(1), "R_2": node(2, nameWithOwner="org/mern-stack-example"), "R_3": node(3)}
+        {"R_1": node(1), "R_2": node(2, nameWithOwner="org/mern-stack-tutorial"), "R_3": node(3)}
     )
     study = StudyConfig.model_validate({"selection": {"reference_date": "2026-06-01"}})
     assert select_repositories(study, session_factory, fake) == {}

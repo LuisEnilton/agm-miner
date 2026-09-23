@@ -134,9 +134,13 @@ def test_empty_table_export_keeps_schema(session_factory, tmp_path: Path) -> Non
     assert frame.schema == table_schema(table)
 
 
+# The synthetic artifacts are tiny and have one human author: these thresholds keep them all.
+EVERYTHING = AnalysisConfig(min_artifact_bytes=0, min_human_contributors=1)
+
+
 def test_gold_datasets(bronze: Path, tmp_path: Path) -> None:
     output = tmp_path / "gold"
-    counts = build_datasets(bronze, output, AnalysisConfig())
+    counts = build_datasets(bronze, output, EVERYTHING)
     assert counts["rq2_structure"] == 2
 
     rq1 = pl.read_parquet(output / "rq1_sections.parquet")
@@ -178,6 +182,31 @@ def test_gold_datasets(bronze: Path, tmp_path: Path) -> None:
     manifest = json.loads((output / "analysis_manifest.json").read_text())
     assert manifest["bronze_manifest"]["schema_revision"] == alembic_head()
     assert manifest["outputs"]["rq3_changes"] == counts["rq3_changes"]
+    assert manifest["sample"]["sample_repositories"] == 1
+
+
+def test_gold_datasets_hold_only_the_study_sample(bronze: Path, tmp_path: Path) -> None:
+    output = tmp_path / "gold"
+    counts = build_datasets(bronze, output, AnalysisConfig())
+
+    # The artifacts are smaller than 2 KB: nothing is in the sample, but silver keeps it all.
+    assert counts["rq1_sections"] == counts["rq2_structure"] == counts["rq3_changes"] == 0
+    assert counts["rq3_author_roles"] == 0
+    assert counts["silver_version_metrics"] > 0
+    sample = pl.read_parquet(output / "silver_artifact_sample.parquet")
+    assert sample.height == 2 and not sample["in_sample"].any()
+    features = pl.read_parquet(output / "repo_features.parquet").row(0, named=True)
+    assert features["in_sample"] is False
+    assert features["exclusion_reason"] == "min_artifact_bytes"
+    assert features["human_contributors"] == 1
+    manifest = json.loads((output / "analysis_manifest.json").read_text())
+    assert manifest["sample"] == {
+        "mined_repositories": 1,
+        "sample_repositories": 0,
+        "excluded_repositories": {"min_artifact_bytes": 1},
+        "artifacts": 2,
+        "sample_artifacts": 0,
+    }
 
 
 def test_interrupted_export_leaves_no_dataset(session_factory, tmp_path: Path, monkeypatch) -> None:

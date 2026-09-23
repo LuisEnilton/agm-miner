@@ -3,9 +3,12 @@
 Silver (one row per parsed artifact version / section):
 
 * ``version_metrics``  — structural and readability metrics of every Markdown version;
-* ``version_sections`` — sections with heading paths of every Markdown version.
+* ``version_sections`` — sections with heading paths of every Markdown version;
+* ``artifact_sample``  — latest size of every artifact and whether it is in the study sample.
 
-Gold (one table per research question):
+Gold (one table per research question) holds the *study sample* only: artifacts whose latest
+version has at least ``min_artifact_bytes``, in repositories with ``min_human_contributors``
+human authors (``repo_features`` keeps every mined repository, with the exclusion reason):
 
 * ``rq1_sections``      — sections of the artifacts at HEAD (input for content coding);
 * ``rq2_structure``     — metrics of the artifacts at HEAD;
@@ -201,6 +204,122 @@ def head_versions(tables: dict[str, pl.DataFrame]) -> pl.DataFrame:
             how="left",
         )
         .join(repositories, on="repo_id", how="left")
+    )
+
+
+_SIZED_KINDS = (ArtifactKind.INSTRUCTION.value, ArtifactKind.SKILL_MANIFEST.value)
+
+
+def latest_versions(tables: dict[str, pl.DataFrame]) -> pl.DataFrame:
+    """The latest version of every artifact: its HEAD version, or for an artifact deleted
+    before HEAD the last version its history recorded."""
+    versions = tables["artifact_versions"].select(
+        pl.col("id").alias("version_id"), "artifact_id", "blob_sha", "is_symlink", "size_bytes"
+    )
+    artifacts = tables["artifacts"].rename({"id": "artifact_id"})
+    at_head = artifacts.filter(pl.col("exists_at_head")).join(
+        versions,
+        left_on=["artifact_id", "head_blob_sha"],
+        right_on=["artifact_id", "blob_sha"],
+        how="left",
+    )
+    last_recorded = (
+        tables["artifact_changes"]
+        .filter(pl.col("version_id").is_not_null())
+        .join(tables["commits"].select("repo_id", "sha", "committed_at"), on=["repo_id", "sha"])
+        .sort("committed_at", "sha")
+        .group_by("artifact_id")
+        .agg(pl.col("version_id").last())
+    )
+    deleted = (
+        artifacts.filter(~pl.col("exists_at_head"))
+        .join(last_recorded, on="artifact_id", how="left")
+        .join(versions.drop("artifact_id", "blob_sha"), on="version_id", how="left")
+    )
+    columns = ["artifact_id", "repo_id", "path", "kind", "skill_name", "exists_at_head"]
+    columns += ["version_id", "is_symlink", "size_bytes"]
+    return pl.concat([at_head.select(columns), deleted.select(columns)])
+
+
+def build_artifact_sample(tables: dict[str, pl.DataFrame], config: AnalysisConfig) -> pl.DataFrame:
+    """Which artifacts belong to the study sample (``in_sample``).
+
+    Instruction files and skill manifests need ``min_artifact_bytes`` in their latest version
+    (a symlink never qualifies by itself; its target is an artifact of its own). Skill resources
+    follow the manifest of their skill.
+    """
+    latest = latest_versions(tables).with_columns(
+        (
+            pl.col("kind").is_in(_SIZED_KINDS)
+            & ~pl.col("is_symlink").fill_null(True)
+            & (pl.col("size_bytes").fill_null(0) >= config.min_artifact_bytes)
+        ).alias("meets_min_size")
+    )
+    skills = (
+        latest.filter(pl.col("kind") == ArtifactKind.SKILL_MANIFEST.value)
+        .group_by("repo_id", "skill_name")
+        .agg(pl.col("meets_min_size").any().alias("skill_in_sample"))
+    )
+    return (
+        latest.join(skills, on=["repo_id", "skill_name"], how="left")
+        .with_columns(
+            pl.when(pl.col("kind") == ArtifactKind.SKILL_RESOURCE.value)
+            .then(pl.col("skill_in_sample").fill_null(False))
+            .otherwise(pl.col("meets_min_size"))
+            .alias("in_sample")
+        )
+        .drop("skill_in_sample", "version_id")
+        .sort("repo_id", "path")
+    )
+
+
+def build_repository_sample(
+    tables: dict[str, pl.DataFrame],
+    artifact_sample: pl.DataFrame,
+    roles: pl.DataFrame,
+    config: AnalysisConfig,
+) -> pl.DataFrame:
+    """Mined repositories with ``in_sample`` and, when excluded, the first failing criterion
+    (``exclusion_reason``), continuing the selection funnel on the mined data."""
+    sized = artifact_sample.group_by("repo_id").agg(
+        (pl.col("in_sample") & pl.col("kind").is_in(_SIZED_KINDS)).sum().alias("sample_artifacts")
+    )
+    humans = (
+        roles.filter(~pl.col("is_bot") & (pl.col("commits") > 0))
+        .group_by("repo_id")
+        .agg(pl.len().alias("human_contributors"))
+    )
+    repositories = (
+        tables["repositories"]
+        .filter(pl.col("status") == "MINED")
+        .select(pl.col("id").alias("repo_id"), "full_name")
+        .join(sized, on="repo_id", how="left")
+        .join(humans, on="repo_id", how="left")
+        .with_columns(pl.col("sample_artifacts", "human_contributors").fill_null(0))
+    )
+    reason = (
+        pl.when(pl.col("sample_artifacts") == 0)
+        .then(pl.lit("min_artifact_bytes"))
+        .when(pl.col("human_contributors") < config.min_human_contributors)
+        .then(pl.lit("min_human_contributors"))
+        .otherwise(pl.lit(None, dtype=pl.Utf8))
+    )
+    return (
+        repositories.with_columns(reason.alias("exclusion_reason"))
+        .with_columns(pl.col("exclusion_reason").is_null().alias("in_sample"))
+        .sort("repo_id")
+    )
+
+
+def sample_artifact_ids(
+    artifact_sample: pl.DataFrame, repository_sample: pl.DataFrame
+) -> pl.DataFrame:
+    """``artifact_id`` of the sample artifacts of the sample repositories."""
+    included = repository_sample.filter(pl.col("in_sample")).select("repo_id")
+    return (
+        artifact_sample.filter(pl.col("in_sample"))
+        .join(included, on="repo_id", how="semi")
+        .select("artifact_id")
     )
 
 
@@ -435,7 +554,10 @@ def build_repo_features(
     structure: pl.DataFrame,
     changes: pl.DataFrame,
     roles: pl.DataFrame,
+    repository_sample: pl.DataFrame,
 ) -> pl.DataFrame:
+    """Every mined repository (``in_sample``/``exclusion_reason`` tell whether it belongs to the
+    study sample); artifact and evolution attributes cover the sample artifacts only."""
     instruction = pl.col("kind") == ArtifactKind.INSTRUCTION.value
     artifact_features = structure.group_by("repo_id").agg(
         (instruction & (pl.col("tool") == ArtifactTool.CLAUDE.value)).any().alias("has_claude_md"),
@@ -477,11 +599,33 @@ def build_repo_features(
         .join(people, on="repo_id", how="left")
         .join(active_months, on="repo_id", how="left")
         .join(manual, on="repo_id", how="left")
+        .join(
+            repository_sample.select(
+                "repo_id", "sample_artifacts", "human_contributors", "in_sample", "exclusion_reason"
+            ),
+            on="repo_id",
+            how="left",
+        )
     )
     return features.with_columns(
         (pl.col("total_commits") / pl.col("active_months")).alias("commits_per_active_month"),
         pl.col("manual_only").fill_null(False),
     ).sort("repo_id")
+
+
+def _sample_funnel(
+    repository_sample: pl.DataFrame, artifact_sample: pl.DataFrame, in_sample: pl.DataFrame
+) -> dict[str, Any]:
+    excluded = repository_sample.filter(~pl.col("in_sample"))
+    return {
+        "mined_repositories": repository_sample.height,
+        "sample_repositories": repository_sample.height - excluded.height,
+        "excluded_repositories": dict(
+            sorted(excluded.group_by("exclusion_reason").len().iter_rows())
+        ),
+        "artifacts": artifact_sample.height,
+        "sample_artifacts": in_sample.height,
+    }
 
 
 # --------------------------------------------------------------------------- entry point
@@ -506,16 +650,28 @@ def _build_into(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> d
     tables = load_bronze(bronze_dir)
     metrics, sections, documents = build_version_tables(tables, config)
     roles = build_author_roles(tables, config)
-    structure = build_rq2_structure(tables, metrics)
-    changes = build_rq3_changes(tables, documents, roles, config)
+    artifact_sample = build_artifact_sample(tables, config)
+    repository_sample = build_repository_sample(tables, artifact_sample, roles, config)
+    in_sample = sample_artifact_ids(artifact_sample, repository_sample)
+    sample_repos = repository_sample.filter(pl.col("in_sample")).select("repo_id")
+
+    # Silver tables keep every artifact (sensitivity analyses can change the thresholds);
+    # gold tables hold the study sample only.
+    structure = build_rq2_structure(tables, metrics).join(in_sample, on="artifact_id", how="semi")
+    changes = build_rq3_changes(tables, documents, roles, config).join(
+        in_sample, on="artifact_id", how="semi"
+    )
     outputs = {
         "silver_version_metrics": metrics,
         "silver_version_sections": sections,
-        "rq1_sections": build_rq1_sections(tables, sections),
+        "silver_artifact_sample": artifact_sample,
+        "rq1_sections": build_rq1_sections(tables, sections).join(
+            in_sample, on="artifact_id", how="semi"
+        ),
         "rq2_structure": structure,
         "rq3_changes": changes,
-        "rq3_author_roles": roles,
-        "repo_features": build_repo_features(tables, structure, changes, roles),
+        "rq3_author_roles": roles.join(sample_repos, on="repo_id", how="semi"),
+        "repo_features": build_repo_features(tables, structure, changes, roles, repository_sample),
     }
     counts = {}
     for name, frame in outputs.items():
@@ -529,6 +685,7 @@ def _build_into(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> d
         "bronze_dir": str(bronze_dir),
         "bronze_manifest": read_manifest(bronze_dir),
         "analysis_config": config.model_dump(mode="json"),
+        "sample": _sample_funnel(repository_sample, artifact_sample, in_sample),
         "outputs": counts,
     }
     (output_dir / ANALYSIS_MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")

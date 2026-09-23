@@ -38,6 +38,7 @@ def alembic_head() -> str:
 
 HUMAN = ("Ana Dev", "ana@example.org")
 BOT = ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com")
+AGENT = ("Claude", "noreply@anthropic.com")  # commits authored by the coding agent itself
 
 V1 = "# Project\n\n## Setup\nInstall with make.\n"
 V2 = V1 + "\n## Testing\nRun pytest before pushing.\n"
@@ -67,6 +68,9 @@ def bronze(tmp_path: Path, session_factory, repo_builder: RepoBuilder) -> Path:
     )
     repo.commit(
         "Bump deps", {"pyproject.toml": "[project]\n"}, author=BOT, date="2024-03-10T00:00:00+00:00"
+    )
+    repo.commit(
+        "Refactor app", {"src/app.py": "x = 2\n"}, author=AGENT, date="2024-03-20T00:00:00+00:00"
     )
     repo.commit(
         "Add skill",
@@ -170,13 +174,16 @@ def test_gold_datasets(bronze: Path, tmp_path: Path) -> None:
     roles = pl.read_parquet(output / "rq3_author_roles.parquet")
     bot = roles.filter(pl.col("is_bot")).row(0, named=True)
     assert bot["role"] == "bot" and bot["share_build_config"] == 1.0
-    human = roles.filter(~pl.col("is_bot")).row(0, named=True)
-    assert human["artifact_commits"] == 3
+    agent = roles.filter(pl.col("agent") == "claude").row(0, named=True)
+    assert agent["role"] == "agent" and not agent["is_bot"]
+    human = roles.filter(pl.col("name") == HUMAN[0]).row(0, named=True)
+    assert human["artifact_commits"] == 3 and human["role"] == "mixed"
 
     features = pl.read_parquet(output / "repo_features.parquet").row(0, named=True)
     assert features["has_claude_md"] and not features["has_agents_md"]
     assert features["skills"] == 1
-    assert features["total_commits"] == 5 and features["contributors"] == 1
+    # The agent's commit counts as activity, but the agent is not a contributor.
+    assert features["total_commits"] == 6 and features["contributors"] == 1
     assert features["artifact_changes"] == 3 and features["artifact_commits"] == 3
     assert features["manual_only"] is True
     manifest = json.loads((output / "analysis_manifest.json").read_text())

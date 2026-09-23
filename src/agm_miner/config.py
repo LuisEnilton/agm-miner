@@ -194,8 +194,8 @@ class AnalysisConfig(_StrictModel):
     # an instruction file or skill manifest belongs to the sample when its latest version has
     # at least this many bytes (symlinks never do: their target is an artifact of its own) ...
     min_artifact_bytes: int = 2048
-    # ... and a repository when it has one such artifact and this many human (non-bot)
-    # authors in its whole history.
+    # ... and a repository when it has one such artifact and this many human authors (neither
+    # bot_patterns nor agent_patterns) in its whole history.
     min_human_contributors: int = 2
     # Author role thresholds, expressed as share of the author's file changes.
     docs_focused_min_share: float = 0.8

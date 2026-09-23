@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import polars as pl
 
 from agm_miner.analysis.datasets import (
+    SKILL_DIR,
     build_artifact_sample,
     build_repository_sample,
     sample_artifact_ids,
@@ -193,3 +194,63 @@ def test_coding_agents_are_not_human_contributors() -> None:
     team = roles((1, False, 5), (1, False, 2), (1, False, 12, "claude"))
     row = build_repository_sample(data, artifacts, team, CONFIG).row(0, named=True)
     assert row["human_contributors"] == 2 and row["in_sample"]
+
+
+def test_skills_with_the_same_name_in_different_directories_are_distinct() -> None:
+    """A monorepo with a "deploy" skill in two packages: each resource follows its own manifest."""
+    data = tables(
+        [
+            artifact(1, "packages/api/.claude/skills/deploy/SKILL.md", "SKILL_MANIFEST", "deploy"),
+            artifact(2, "packages/api/.claude/skills/deploy/run.sh", "SKILL_RESOURCE", "deploy"),
+            artifact(3, "packages/web/.claude/skills/deploy/SKILL.md", "SKILL_MANIFEST", "deploy"),
+            artifact(4, "packages/web/.claude/skills/deploy/run.sh", "SKILL_RESOURCE", "deploy"),
+            artifact(5, ".claude/skills/README.md", "SKILL_RESOURCE"),  # belongs to no skill
+        ],
+        [
+            version(1, 1, BIG),
+            version(2, 2, 10),
+            version(3, 3, SMALL),
+            version(4, 4, BIG),
+            version(5, 5, BIG),
+        ],
+        [],
+    )
+    sample = build_artifact_sample(data, CONFIG)
+    assert in_sample(sample) == {
+        "packages/api/.claude/skills/deploy/SKILL.md": True,
+        "packages/api/.claude/skills/deploy/run.sh": True,
+        "packages/web/.claude/skills/deploy/SKILL.md": False,
+        "packages/web/.claude/skills/deploy/run.sh": False,
+        ".claude/skills/README.md": False,
+    }
+    assert (
+        dict(sample.select("path", "skill_dir").iter_rows())[
+            "packages/web/.claude/skills/deploy/run.sh"
+        ]
+        == "packages/web/.claude/skills/deploy"
+    )
+
+
+def test_skill_directory() -> None:
+    paths = pl.DataFrame(
+        {
+            "path": [
+                ".claude/skills/db/SKILL.md",
+                ".claude/skills/db/scripts/migrate.sh",
+                "packages/api/.claude/skills/db/SKILL.md",
+                ".claude/skills/README.md",  # directly in .claude/skills/: no skill
+                "x.claude/skills/db/SKILL.md",  # not a .claude directory
+                "CLAUDE.md",
+            ]
+        }
+    )
+    assert paths.select(SKILL_DIR)["path"].to_list() == [
+        ".claude/skills/db",
+        ".claude/skills/db",
+        "packages/api/.claude/skills/db",
+        None,
+        None,
+        None,
+    ]
+    # repo_features counts skills this way: same-named skills in two directories are two skills.
+    assert paths.select(SKILL_DIR.drop_nulls().n_unique()).item() == 2

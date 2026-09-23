@@ -109,8 +109,10 @@ Princípios que precisam ser mantidos:
   tabelas de análise.
 - `discovery_hits`: qual query encontrou qual arquivo (procedência; `manual:add-repo` para adições
   manuais). `discovery_slices`: progresso da bisseção (`SPLIT`/`COLLECTED` por fatia) para retomar.
-- `artifacts` (repo, path, tool, kind, scope, skill_name, `exists_at_head`, `head_blob_sha`),
-  `artifact_versions` (um blob por artefato; `content`, `is_symlink`, `content_omitted`) e
+- `artifacts` (repo, path, tool, kind, scope, skill_name, `exists_at_head`, `head_blob_sha`).
+  `skill_name` é só o nome da pasta e se repete entre pacotes de um monorepo: para identificar
+  uma skill, use a pasta dela (`analysis.datasets.SKILL_DIR`).
+- `artifact_versions` (um blob por artefato; `content`, `is_symlink`, `content_omitted`) e
   `artifact_changes` (PK artifact+sha; A/M/D/T/R/C, `source_path` de renomeação/cópia, numstat,
   blob antes/depois).
 - `commits` (só commits não-merge que tocaram artefatos; PK `(repo_id, sha)`),

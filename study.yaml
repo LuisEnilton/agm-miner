@@ -19,9 +19,10 @@ selection:
   exclude_archived: true
   exclude_templates: true
   exclude_mirrors: true
-  # Repositories older than the agent tools, so the artifacts are additions to established
-  # projects (same cutoff as Mohsenimofidi et al. 2025 and Galster et al. 2026).
-  created_before: 2026-09-01
+  # Only repositories created before this date. Related studies use 2024-01-01 (projects older
+  # than the agent tools); this study keeps projects created with agents and only leaves out
+  # the newest ones, whose history is too short before the reference date.
+  created_before: 2026-08-01
   # allowed_licenses: OSI-approved licenses (default list in config.py), as in the same studies.
   require_code_language: true   # primary language must not be Markdown, HTML or other prose
   # Latest commit of the default branch within a year of the reference date.

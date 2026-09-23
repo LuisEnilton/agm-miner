@@ -163,8 +163,9 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
   autor precisam de validação manual numa amostra antes da coleta final.
 - `hours_since_previous_change` usa a data de autoria (rebases podem distorcer). Flesch só é
   calculado para textos detectados como inglês, e listas sem pontuação distorcem o índice.
-- `reference_date` no `study.yaml` fica fixa durante a coleta. O corte `created_before`
-  (2024-01-01) exclui projetos criados já com agentes.
+- `reference_date` no `study.yaml` fica fixa durante a coleta. O corte `created_before` do estudo
+  (2026-08-01) é mais tardio que o dos artigos relacionados (2024-01-01, o padrão de `config.py`),
+  então a amostra inclui projetos criados já com agentes.
 
 ## Como estender
 

@@ -242,7 +242,7 @@ Aplicados em ordem; o primeiro que falha é o motivo gravado.
 | Critério | Valor | Estágio | Motivo de exclusão |
 |---|---|---|---|
 | Não vazio, não fork, não arquivado, não espelho, não template | — | select | `empty`, `fork`, `archived`, `mirror`, `template` |
-| Criado antes do corte | 2024-01-01 | select | `created_after_cutoff` |
+| Criado antes do corte | 2026-08-01 | select | `created_after_cutoff` |
 | Licença aprovada pela OSI | lista em `config.py` | select | `license` |
 | Linguagem principal é de programação (não Markdown, HTML ou prosa) | — | select | `no_code_language` |
 | Estrelas | ≥ 50 | select | `min_stars` |
@@ -253,10 +253,14 @@ Aplicados em ordem; o primeiro que falha é o motivo gravado.
 | Autores humanos (sem bots) no histórico inteiro | ≥ 2 | analyze | `min_human_contributors` |
 
 Origem das escolhas:
-- a data de corte de criação, as licenças OSI, os ≥ 2 contribuidores e a atividade medida por
-  commits (e não por push) seguem Mohsenimofidi et al. (*Context Engineering for AI Agents in
-  Open-Source Software*, 2025) e Galster et al. (*Harness Engineering for Agentic AI Coding
-  Tools*, 2026). O corte garante que os artefatos foram acrescentados a projetos que já existiam;
+- as licenças OSI, os ≥ 2 contribuidores, a atividade medida por commits (e não por push) e a
+  existência de um corte de criação seguem Mohsenimofidi et al. (*Context Engineering for AI
+  Agents in Open-Source Software*, 2025) e Galster et al. (*Harness Engineering for Agentic AI
+  Coding Tools*, 2026);
+- a data do corte é diferente da desses artigos. Eles usam 2024-01-01, para estudar só projetos
+  anteriores às ferramentas de agentes. Este estudo usa 2026-08-01: inclui projetos criados já com
+  agentes e deixa de fora só os criados nas últimas semanas antes da `reference_date`, cujo
+  histórico é curto demais para a RQ3;
 - a exclusão de tutoriais, listas e templates segue Santos et al. (*Decoding the
   Configuration of AI Coding Agents*, 2025).
 
@@ -286,14 +290,16 @@ O estudo usa duas datas diferentes, ambas na seção `selection`:
 
 ```yaml
 selection:
-  created_before: 2024-01-01    # data de corte de CRIAÇÃO do repositório
+  created_before: 2026-08-01    # data de corte de CRIAÇÃO do repositório
   reference_date: 2026-09-23    # data de referência da ATIVIDADE (início da coleta)
   active_within_days: 365
 ```
 
 - **`created_before`** é a data de corte de criação: só entram repositórios **criados antes**
   dela (a data em si já fica de fora). Para mudar o corte, troque o valor, por exemplo
-  `created_before: 2025-01-01`. Para desligar o critério, use `created_before: null`.
+  `created_before: 2024-01-01` para usar o corte dos artigos relacionados. Para desligar o
+  critério, use `created_before: null`. Sem a chave no `study.yaml`, vale o padrão de `config.py`
+  (2024-01-01).
 - **`reference_date`** é a data a partir da qual a atividade é contada para trás: um repositório é
   ativo quando o último commit do branch default é, no máximo, `active_within_days` dias anterior
   a ela. Com os valores acima, ele precisa de um commit a partir de 2025-09-23. Use a data de início
@@ -378,8 +384,10 @@ criados durante o teste. O CI (GitHub Actions) roda lint e testes em cada PR.
   resultados não são determinísticos.
 - As heurísticas de tutorial/lista, bots, agentes e papéis de autor devem ser validadas
   manualmente numa amostra.
-- O corte de criação (2024-01-01) exclui projetos criados já com agentes. As conclusões valem
-  para projetos estabelecidos que adotaram os artefatos.
+- O corte de criação (2026-08-01) é mais tardio que o dos artigos relacionados (2024-01-01), então
+  a amostra mistura projetos anteriores às ferramentas de agentes e projetos criados já com elas.
+  Para comparar com esses artigos, separe os dois grupos por `gh_created_at` em `repo_features`
+  ou repita a seleção com `created_before: 2024-01-01`.
 - A linguagem principal vem do GitHub Linguist, que não conta Markdown. Um repositório de
   documentação com um script pequeno ainda passa.
 - A legibilidade (Flesch) só é calculada para textos em inglês.

@@ -100,7 +100,8 @@ Princípios que precisam ser mantidos:
 - `pipeline_runs`: estágio, status (`RUNNING`/`SUCCEEDED`/`FAILED`/`INTERRUPTED`), params, stats,
   `study_config` (JSONB), `code_version`.
 - `repositories`: id numérico do GitHub + `node_id` (GraphQL), metadados da seleção
-  (`metadata_fetched_at`), status `DISCOVERED → SELECTED|REJECTED → MINED|FAILED` e
+  (`metadata_fetched_at`; `last_commit_at` é a data do commit HEAD do branch default, usada no
+  critério de atividade), status `DISCOVERED → SELECTED|REJECTED → MINED|FAILED` e
   `rejection_reason` (primeiro critério que falhou). A identidade é o `id`. O `full_name` **não é
   único**, porque o GitHub pode reaproveitar o nome de um repositório renomeado ou apagado.
   `agm select --reevaluate` aplica os critérios atuais a todos os repositórios: `MINED`/`FAILED` que
@@ -162,7 +163,8 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
   autor precisam de validação manual numa amostra antes da coleta final.
 - `hours_since_previous_change` usa a data de autoria (rebases podem distorcer). Flesch só é
   calculado para textos detectados como inglês, e listas sem pontuação distorcem o índice.
-- `reference_date` no `study.yaml` precisa ser fixada antes da coleta final.
+- `reference_date` no `study.yaml` fica fixa durante a coleta. O corte `created_before`
+  (2024-01-01) exclui projetos criados já com agentes.
 
 ## Como estender
 
@@ -171,3 +173,8 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
   migração (a constraint CHECK muda). Cubra com casos em `tests/test_artifacts.py`.
 - **Nova métrica**: implemente em `analysis/` e acrescente ao schema da tabela silver/gold
   correspondente. Não mexa no minerador.
+- **Novo critério de amostragem**: se depende de metadados do GitHub, entra em
+  `selection.evaluate` (motivo gravado no banco, funil via `agm runs funnel`); se depende do
+  histórico minerado, entra em `build_repository_sample`/`build_artifact_sample` de
+  `analysis/datasets.py` (motivo em `repo_features.exclusion_reason`). O limite vai para o
+  `study.yaml`. As tabelas silver nunca são filtradas; as gold contêm só a amostra.

@@ -8,6 +8,9 @@ discovery:
     - "filename:CLAUDE.md"
     - "filename:AGENTS.md"
     - "path:.claude/skills filename:SKILL.md"
+  # Files smaller than analysis.min_artifact_bytes never enter the sample, so they are not
+  # searched for (this also avoids the densest size slices, where the 1000-result cap bites).
+  size_min: 2048
 
 selection:
   min_stars: 50
@@ -16,8 +19,14 @@ selection:
   exclude_archived: true
   exclude_templates: true
   exclude_mirrors: true
+  # Repositories older than the agent tools, so the artifacts are additions to established
+  # projects (same cutoff as Mohsenimofidi et al. 2025 and Galster et al. 2026).
+  created_before: 2026-09-01
+  # allowed_licenses: OSI-approved licenses (default list in config.py), as in the same studies.
+  require_code_language: true   # primary language must not be Markdown, HTML or other prose
+  # Latest commit of the default branch within a year of the reference date.
   active_within_days: 365
-  reference_date: null   # set a fixed date (YYYY-MM-DD) before the final data collection
+  reference_date: 2026-09-23    # start of the data collection; keep it fixed afterwards
 
 mining:
   max_content_bytes: 2097152
@@ -25,3 +34,7 @@ mining:
 
 analysis:
   burst_window_hours: 24
+  # Study sample, applied to the mined data: instruction files / skill manifests of at least
+  # 2 KiB in repositories with at least 2 human authors.
+  min_artifact_bytes: 2048
+  min_human_contributors: 2

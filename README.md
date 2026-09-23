@@ -24,8 +24,8 @@ agm discover → agm select → agm mine → agm export → agm analyze
    contornado com bisseção do intervalo de tamanho (`size:`), e cada achado é registrado com a
    query que o encontrou.
 2. **select**: busca os metadados dos repositórios via GraphQL e aplica os critérios do
-   `study.yaml` (estrelas, commits, atividade, forks, arquivados, templates, tutoriais/listas). Os
-   rejeitados guardam o motivo, o que gera o funil de seleção do artigo (`agm runs funnel`).
+   `study.yaml` (seção "Critérios de amostragem" abaixo). Os rejeitados guardam o motivo, o que
+   gera o funil de seleção do artigo (`agm runs funnel`).
 3. **mine**: faz um clone parcial (sem blobs) de cada repositório selecionado e extrai o histórico
    completo dos artefatos, o conteúdo de cada versão, renomeações/cópias, os arquivos alterados em
    cada commit, trailers `Co-authored-by` e o perfil de atividade de cada contribuidor. A
@@ -34,7 +34,8 @@ agm discover → agm select → agm mine → agm export → agm analyze
    `manifest.json` (versão do código, do schema e da configuração do estudo).
 5. **analyze**: a partir de um export bronze, sem precisar do banco, gera em
    `data/gold/<timestamp>/` as tabelas `rq1_sections`, `rq2_structure`, `rq3_changes`,
-   `rq3_author_roles` e `repo_features`.
+   `rq3_author_roles` e `repo_features`. As tabelas gold contêm só a amostra do estudo (critérios
+   que dependem do histórico minerado); as silver guardam tudo.
 
 Toda execução fica registrada em `pipeline_runs`, com parâmetros, estatísticas, o snapshot do
 `study.yaml` e o commit do código. Isso garante a rastreabilidade do dataset.
@@ -229,9 +230,136 @@ which this code does not know (it was created by an incompatible version of agm-
 
 Os parâmetros metodológicos ficam em [study.yaml](study.yaml): queries, critérios de seleção,
 limites de mineração, padrões de bots e agentes, janela de pico. Mude os valores ali, não no
-código. Depois de alterar os critérios, rode `agm select --reevaluate` para reaplicá-los a todos os
-repositórios, inclusive os já minerados. **Antes da coleta final, fixe `selection.reference_date`**, senão o critério de atividade
-depende da data em que o comando rodou.
+código. Depois de alterar os critérios do `select`, rode `agm select --reevaluate` para reaplicá-los
+a todos os repositórios, inclusive os já minerados. Os critérios da análise só exigem rodar
+`agm analyze` de novo. `selection.reference_date` fica fixa durante toda a coleta, senão o critério
+de atividade depende da data em que o comando rodou.
+
+### Critérios de amostragem
+
+Aplicados em ordem; o primeiro que falha é o motivo gravado.
+
+| Critério | Valor | Estágio | Motivo de exclusão |
+|---|---|---|---|
+| Não vazio, não fork, não arquivado, não espelho, não template | — | select | `empty`, `fork`, `archived`, `mirror`, `template` |
+| Criado antes do corte | 2024-01-01 | select | `created_after_cutoff` |
+| Licença aprovada pela OSI | lista em `config.py` | select | `license` |
+| Linguagem principal é de programação (não Markdown, HTML ou prosa) | — | select | `no_code_language` |
+| Estrelas | ≥ 50 | select | `min_stars` |
+| Commits no branch default | ≥ 10 | select | `min_commits` |
+| Último commit do branch default | até 365 dias antes de `reference_date` | select | `inactive` |
+| Nome, descrição ou tópicos sem palavras de tutorial/lista | `exclude_keywords` | select | `keyword:<palavra>` |
+| Arquivo de instrução ou `SKILL.md` com tamanho mínimo (última versão, sem symlinks) | ≥ 2048 bytes | analyze | `min_artifact_bytes` |
+| Autores humanos (sem bots) no histórico inteiro | ≥ 2 | analyze | `min_human_contributors` |
+
+Origem das escolhas:
+- a data de corte de criação, as licenças OSI, os ≥ 2 contribuidores e a atividade medida por
+  commits (e não por push) seguem Mohsenimofidi et al. (*Context Engineering for AI Agents in
+  Open-Source Software*, 2025) e Galster et al. (*Harness Engineering for Agentic AI Coding
+  Tools*, 2026). O corte garante que os artefatos foram acrescentados a projetos que já existiam;
+- a exclusão de tutoriais, listas e templates segue Santos et al. (*Decoding the
+  Configuration of AI Coding Agents*, 2025).
+
+Os critérios da análise saem no `analysis_manifest.json` (`sample`) e nas colunas `in_sample` e
+`exclusion_reason` de `repo_features`, continuando o funil do `select`. O `discover` já começa a
+busca em `size_min: 2048`, porque arquivos menores nunca entram na amostra.
+
+### Como configurar cada parâmetro
+
+Todos os parâmetros ficam no [study.yaml](study.yaml), na raiz do repositório. Uma chave ausente
+usa o valor padrão de [config.py](src/agm_miner/config.py), e uma chave desconhecida (por exemplo,
+um erro de digitação) faz o comando parar com erro. Para testar outra configuração sem mexer no
+arquivo principal, copie-o e passe a cópia com `--study` (`agm select --study outro.yaml`) ou pela
+variável `STUDY_CONFIG_PATH` no `.env`.
+
+Depois de mudar um parâmetro, rode de novo o estágio dele:
+
+| Seção do `study.yaml` | O que rodar depois da mudança |
+|---|---|
+| `selection` | `poetry run agm select --reevaluate` (busca os metadados de novo e reaplica os critérios a todos os repositórios, inclusive os já minerados) |
+| `analysis` | `poetry run agm analyze` (não precisa minerar nem exportar de novo) |
+| `discovery.size_min` | `poetry run agm discover` (o progresso salvo é por intervalo de tamanho, então os intervalos novos são buscados; o que já foi encontrado continua no banco) |
+
+#### As duas datas de corte
+
+O estudo usa duas datas diferentes, ambas na seção `selection`:
+
+```yaml
+selection:
+  created_before: 2024-01-01    # data de corte de CRIAÇÃO do repositório
+  reference_date: 2026-09-23    # data de referência da ATIVIDADE (início da coleta)
+  active_within_days: 365
+```
+
+- **`created_before`** é a data de corte de criação: só entram repositórios **criados antes**
+  dela (a data em si já fica de fora). Para mudar o corte, troque o valor, por exemplo
+  `created_before: 2025-01-01`. Para desligar o critério, use `created_before: null`.
+- **`reference_date`** é a data a partir da qual a atividade é contada para trás: um repositório é
+  ativo quando o último commit do branch default é, no máximo, `active_within_days` dias anterior
+  a ela. Com os valores acima, ele precisa de um commit a partir de 2025-09-23. Use a data de início
+  da coleta final e **não a mude durante a coleta**. Com `null`, vale a data do dia em que o `select`
+  roda, e o resultado muda de um dia para o outro (a data efetiva fica em `pipeline_runs.params`).
+- **`active_within_days`** é o tamanho da janela, em dias. Com `null`, o critério de atividade é
+  desligado.
+
+As datas são escritas no formato `AAAA-MM-DD`, sem aspas.
+
+#### Licenças
+
+```yaml
+selection:
+  allowed_licenses: [MIT, Apache-2.0, BSD-3-Clause, GPL-3.0]
+```
+
+Os valores são identificadores SPDX, como o GitHub os informa (maiúsculas não importam). Declarar a
+chave **substitui** a lista padrão inteira (34 licenças aprovadas pela OSI, em `config.py`), então
+liste todas as que devem ser aceitas. `allowed_licenses: null` aceita qualquer repositório, inclusive
+os sem licença. Repositórios cuja licença o GitHub não reconhece aparecem como `NOASSERTION` e são
+rejeitados, a menos que você inclua esse valor na lista.
+
+#### Linguagem principal
+
+```yaml
+selection:
+  require_code_language: true
+  non_code_languages: [Markdown, MDX, HTML, reStructuredText, AsciiDoc, Text]
+```
+
+A linguagem principal é a que o GitHub mostra no repositório. Ela é rejeitada quando falta ou
+está em `non_code_languages` (nomes como o GitHub os escreve; maiúsculas não importam). Para
+também excluir, por exemplo, repositórios de CSS ou de TeX, acrescente `CSS` ou `TeX` à lista.
+`require_code_language: false` desliga o critério.
+
+#### Palavras de tutorial/lista
+
+```yaml
+selection:
+  exclude_keywords: [awesome, tutorial, course, boilerplate, cheatsheet, starter, dotfiles]
+```
+
+As palavras são procuradas inteiras, no singular ou no plural, no nome, na descrição e nos tópicos
+do repositório. Declarar a chave substitui a lista padrão. Evite palavras ambíguas, como
+`example` ou `template`, que também rejeitam software real.
+
+#### Tamanho mínimo do artefato e contribuidores humanos
+
+```yaml
+analysis:
+  min_artifact_bytes: 2048
+  min_human_contributors: 2
+```
+
+- **`min_artifact_bytes`**: tamanho mínimo, em bytes, da última versão de um arquivo de
+  instrução (`CLAUDE.md`, `AGENTS.md`) ou de um `SKILL.md`. Com `0`, todos os artefatos entram.
+  Se você **diminuir** esse valor, diminua também `discovery.size_min`, senão a busca não encontra
+  os arquivos menores.
+- **`min_human_contributors`**: mínimo de autores humanos (bots não contam) no histórico inteiro do
+  repositório. Com `1`, o critério deixa de excluir repositórios. Os bots são reconhecidos por
+  `analysis.bot_patterns`.
+
+Como esses dois critérios são aplicados na análise, dá para medir o efeito de outro limite
+(análise de sensibilidade) rodando `agm analyze --study outro.yaml --output <outra pasta>`
+sobre o mesmo export.
 
 ## Testes
 
@@ -250,6 +378,10 @@ criados durante o teste. O CI (GitHub Actions) roda lint e testes em cada PR.
   resultados não são determinísticos.
 - As heurísticas de tutorial/lista, bots, agentes e papéis de autor devem ser validadas
   manualmente numa amostra.
+- O corte de criação (2024-01-01) exclui projetos criados já com agentes. As conclusões valem
+  para projetos estabelecidos que adotaram os artefatos.
+- A linguagem principal vem do GitHub Linguist, que não conta Markdown. Um repositório de
+  documentação com um script pequeno ainda passa.
 - A legibilidade (Flesch) só é calculada para textos em inglês.
 
 Mais detalhes técnicos estão em [AGENTS.md](AGENTS.md).

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -97,6 +98,9 @@ class GitHubClient:
             requester = github.requester
         self._requester = requester
         self._sleep = sleep
+        self._wait_observer: Callable[[str, float], AbstractContextManager[Any]] = (
+            lambda reason, seconds: nullcontext()
+        )
         self._monotonic = monotonic
         self._wall_clock = wall_clock
         self._buckets: dict[str, _BucketState] = {}
@@ -106,6 +110,11 @@ class GitHubClient:
         }
 
     # ------------------------------------------------------------------ public API
+
+    def observe_waits(self, observer: Callable[[str, float], AbstractContextManager[Any]]) -> None:
+        """Wrap every wait (pacing, low quota, retry back-off) in ``observer(reason, seconds)``,
+        e.g. ``run.progress.waiting``, so the progress shows why the stage is idle."""
+        self._wait_observer = observer
 
     def search_code(self, query: str, page: int, per_page: int = 100) -> CodeSearchPage:
         """One page (1-based) of ``GET /search/code``."""
@@ -172,7 +181,11 @@ class GitHubClient:
                     max_retries,
                     delay,
                 )
-                self._sleep(delay)
+                self._wait(
+                    f"GitHub {bucket} request failed with {exc.status}; "
+                    f"retry {attempt + 1}/{max_retries}",
+                    delay,
+                )
                 continue
             self._record_headers(state, headers)
             return data
@@ -183,7 +196,7 @@ class GitHubClient:
         if state.last_request is not None and interval:
             wait = state.last_request + interval - self._monotonic()
             if wait > 0:
-                self._sleep(wait)
+                self._wait(f"GitHub {bucket} pacing ({interval:g}s between requests)", wait)
         threshold = self._thresholds.get(bucket, 0)
         if (
             state.remaining is not None
@@ -200,9 +213,13 @@ class GitHubClient:
                     state.remaining,
                     wait,
                 )
-                self._sleep(wait)
+                self._wait(f"GitHub {bucket} quota low ({state.remaining} left)", wait)
             state.remaining = None
         state.last_request = self._monotonic()
+
+    def _wait(self, reason: str, seconds: float) -> None:
+        with self._wait_observer(reason, seconds):
+            self._sleep(seconds)
 
     @staticmethod
     def _record_headers(state: _BucketState, headers: dict[str, Any]) -> None:

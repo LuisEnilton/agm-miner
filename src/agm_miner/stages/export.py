@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from sqlalchemy import (
     Table,
     Text,
     cast,
+    func,
     select,
     text,
 )
@@ -74,7 +76,13 @@ def _select(table: Table):
     return select(*columns).order_by(*table.primary_key.columns)
 
 
-def export_table(connection: Connection, table: Table, destination: Path) -> int:
+def export_table(
+    connection: Connection,
+    table: Table,
+    destination: Path,
+    on_rows: Callable[[int], None] | None = None,
+) -> int:
+    """Stream ``table`` into ``destination``; ``on_rows(n)`` is called after each batch."""
     schema = table_schema(table)
     rows = 0
     writer: pq.ParquetWriter | None = None
@@ -89,6 +97,8 @@ def export_table(connection: Connection, table: Table, destination: Path) -> int
                 writer = pq.ParquetWriter(destination, arrow.schema)
             writer.write_table(arrow)
             rows += frame.height
+            if on_rows is not None:
+                on_rows(frame.height)
         if writer is None:
             pl.DataFrame(schema=schema).write_parquet(destination)
     finally:
@@ -135,10 +145,28 @@ def _export_into(
         engine.connect().execution_options(isolation_level="REPEATABLE READ") as connection,
         connection.begin(),
     ):
+        progress = run.progress
+        all_tables = Base.metadata.sorted_tables
+        progress.set_phase("counting rows")
+        progress.set_total("tables", len(all_tables))
+        progress.set_total(
+            "rows",
+            sum(
+                connection.execute(select(func.count()).select_from(table)).scalar_one()
+                for table in all_tables
+            ),
+        )
         tables: dict[str, int] = {}
-        for table in Base.metadata.sorted_tables:
-            count = export_table(connection, table, staging / f"{table.name}.parquet")
+        for table in all_tables:
+            progress.set_phase(f"exporting {table.name}")
+            count = export_table(
+                connection,
+                table,
+                staging / f"{table.name}.parquet",
+                on_rows=lambda rows: progress.advance("rows", rows),
+            )
             tables[table.name] = count
+            progress.advance("tables")
             logger.info("Exported %s rows from %s", count, table.name)
         schema_revision = connection.execute(
             text("SELECT version_num FROM alembic_version")

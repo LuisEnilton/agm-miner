@@ -37,6 +37,7 @@ from agm_miner.analysis.structure_diff import diff_documents
 from agm_miner.artifacts import ArtifactKind, ArtifactTool
 from agm_miner.config import AnalysisConfig
 from agm_miner.file_categories import FileCategory
+from agm_miner.progress import Progress
 from agm_miner.runs import code_version
 from agm_miner.stages.export import read_manifest
 
@@ -72,7 +73,7 @@ def is_markdown_artifact(path: str, kind: str) -> bool:
 
 
 def build_version_tables(
-    tables: dict[str, pl.DataFrame], config: AnalysisConfig
+    tables: dict[str, pl.DataFrame], config: AnalysisConfig, progress: Progress | None = None
 ) -> tuple[pl.DataFrame, pl.DataFrame, dict[tuple[int, str], ParsedDocument]]:
     """Parse every Markdown version once (cached by blob, since identical blobs are identical
     content). Returns metrics, sections and the parsed documents keyed by (repo_id, blob_sha)."""
@@ -85,7 +86,10 @@ def build_version_tables(
     metric_rows: list[dict[str, Any]] = []
     section_rows: list[dict[str, Any]] = []
 
+    progress = progress or Progress()
+    progress.set_total("versions", versions.height)
     for row in versions.iter_rows(named=True):
+        progress.advance("versions")
         if (
             row["content"] is None
             or row["is_symlink"]
@@ -638,13 +642,22 @@ def _sample_funnel(
 # --------------------------------------------------------------------------- entry point
 
 
-def build_datasets(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> dict[str, int]:
-    """Write every dataset to ``output_dir``, replacing it only once all files are complete."""
+def build_datasets(
+    bronze_dir: Path,
+    output_dir: Path,
+    config: AnalysisConfig,
+    progress: Progress | None = None,
+) -> dict[str, int]:
+    """Write every dataset to ``output_dir``, replacing it only once all files are complete.
+
+    The analysis never touches the database, so ``progress`` is only shown by the terminal that
+    runs it.
+    """
     staging = output_dir.with_name(output_dir.name + ".partial")
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
     try:
-        counts = _build_into(bronze_dir, staging, config)
+        counts = _build_into(bronze_dir, staging, config, progress or Progress("ANALYZE"))
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -653,10 +666,37 @@ def build_datasets(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -
     return counts
 
 
-def _build_into(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> dict[str, int]:
+_STEPS = (
+    "loading the bronze export",
+    "parsing artifact versions",
+    "classifying authors",
+    "selecting the study sample",
+    "building RQ2 structure",
+    "building RQ3 changes",
+    "building RQ1 sections and repository features",
+    "writing datasets",
+)
+
+
+def _build_into(
+    bronze_dir: Path, output_dir: Path, config: AnalysisConfig, progress: Progress
+) -> dict[str, int]:
+    progress.set_total("steps", len(_STEPS))
+    steps = iter(_STEPS)
+
+    def step() -> None:
+        name = next(steps)
+        if name != _STEPS[0]:
+            progress.advance("steps")
+        progress.set_phase(name)
+
+    step()
     tables = load_bronze(bronze_dir)
-    metrics, sections, documents = build_version_tables(tables, config)
+    step()
+    metrics, sections, documents = build_version_tables(tables, config, progress)
+    step()
     roles = build_author_roles(tables, config)
+    step()
     artifact_sample = build_artifact_sample(tables, config)
     repository_sample = build_repository_sample(tables, artifact_sample, roles, config)
     in_sample = sample_artifact_ids(artifact_sample, repository_sample)
@@ -664,10 +704,13 @@ def _build_into(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> d
 
     # Silver tables keep every artifact (sensitivity analyses can change the thresholds);
     # gold tables hold the study sample only.
+    step()
     structure = build_rq2_structure(tables, metrics).join(in_sample, on="artifact_id", how="semi")
+    step()
     changes = build_rq3_changes(tables, documents, roles, config).join(
         in_sample, on="artifact_id", how="semi"
     )
+    step()
     outputs = {
         "silver_version_metrics": metrics,
         "silver_version_sections": sections,
@@ -680,6 +723,7 @@ def _build_into(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> d
         "rq3_author_roles": roles.join(sample_repos, on="repo_id", how="semi"),
         "repo_features": build_repo_features(tables, structure, changes, roles, repository_sample),
     }
+    step()
     counts = {}
     for name, frame in outputs.items():
         frame.write_parquet(output_dir / f"{name}.parquet")
@@ -696,4 +740,5 @@ def _build_into(bronze_dir: Path, output_dir: Path, config: AnalysisConfig) -> d
         "outputs": counts,
     }
     (output_dir / ANALYSIS_MANIFEST).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    progress.advance("steps")
     return counts

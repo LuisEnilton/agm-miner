@@ -32,6 +32,9 @@ class FakeSearch:
         self.cap = cap
         self.queries: list[tuple[str, int]] = []
 
+    def observe_waits(self, observer) -> None:
+        pass  # the fake never waits
+
     def search_code(self, query: str, page: int, per_page: int = 100) -> CodeSearchPage:
         self.queries.append((query, page))
         match = _SIZE_RE.search(query)

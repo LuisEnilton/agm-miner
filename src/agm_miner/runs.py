@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from agm_miner.config import StudyConfig
 from agm_miner.database.models import PipelineRun, RunStage, RunStatus
-from agm_miner.progress import Progress
+from agm_miner.progress import Progress, publishing
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,8 @@ def track_run(
     heartbeat = _Heartbeat(session_factory, context, heartbeat_seconds)
     heartbeat.start()
     try:
-        yield context
+        with publishing(progress):
+            yield context
     except KeyboardInterrupt:
         heartbeat.stop()
         _finish(session_factory, context, RunStatus.INTERRUPTED)

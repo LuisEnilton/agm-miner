@@ -296,7 +296,7 @@ def test_errors_caused_by_an_abort_are_not_failures(
     add_repositories(session_factory, 1)
     cancellation = Cancellation()
 
-    def killed_mid_extraction(clone, config):
+    def killed_mid_extraction(clone, config, on_phase):
         cancellation.stopping.set()
         cancellation.aborting.set()
         raise GitError(["log"], -9, "killed")

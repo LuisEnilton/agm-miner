@@ -135,13 +135,24 @@ def mine_repositories(
         candidates = _candidates(session_factory, options)
         run.stats["candidates"] = len(candidates)
         logger.info("Mining %s repositories with %s worker(s)", len(candidates), options.workers)
+        run.progress.set_total("repositories", len(candidates))
+        run.progress.set_phase(
+            f"mining {len(candidates)} repositories with {options.workers} worker(s)"
+        )
 
         def work(repo_id: int) -> MiningOutcome:
             return _mine_one(
-                settings, study, session_factory, options, clone_url, repo_id, run.id, cancellation
+                settings,
+                study,
+                session_factory,
+                options,
+                clone_url,
+                repo_id,
+                run,
+                cancellation,
             )
 
-        pool = ThreadPoolExecutor(max_workers=max(1, options.workers))
+        pool = ThreadPoolExecutor(max_workers=max(1, options.workers), thread_name_prefix="worker")
         try:
             with _signals_escalate(cancellation):
                 futures = [pool.submit(work, repo_id) for repo_id in candidates]
@@ -187,11 +198,13 @@ def _drain(
         if cancellation.stopping.is_set():
             for future in pending:
                 future.cancel()
+            action = "aborting" if cancellation.aborting.is_set() else "stopping"
+            run.progress.set_phase(f"{action}: waiting for the repositories in progress")
         for future in done:
-            if future.cancelled():
-                run.increment(MiningOutcome.NOT_STARTED.value)
-            else:
-                run.increment(future.result().value)
+            outcome = MiningOutcome.NOT_STARTED if future.cancelled() else future.result()
+            run.increment(outcome.value)
+            run.progress.advance("repositories")
+            run.progress.advance(outcome.value)
 
 
 def _candidates(session_factory: sessionmaker[Session], options: MiningOptions) -> list[int]:
@@ -227,7 +240,7 @@ def _mine_one(
     options: MiningOptions,
     clone_url: Callable[[str], str],
     repo_id: int,
-    run_id: int,
+    run: RunContext,
     cancellation: Cancellation,
 ) -> MiningOutcome:
     if cancellation.stopping.is_set():
@@ -241,7 +254,7 @@ def _mine_one(
             return MiningOutcome.LOCKED
         try:
             return _mine_locked(
-                settings, study, session_factory, options, clone_url, repo_id, run_id, cancellation
+                settings, study, session_factory, options, clone_url, repo_id, run, cancellation
             )
         finally:
             lock_connection.execute(select(func.pg_advisory_unlock(repo_id)))
@@ -255,7 +268,7 @@ def _mine_locked(
     options: MiningOptions,
     clone_url: Callable[[str], str],
     repo_id: int,
-    run_id: int,
+    run: RunContext,
     cancellation: Cancellation,
 ) -> MiningOutcome:
     with session_factory() as session:
@@ -272,8 +285,12 @@ def _mine_locked(
     url = clone_url(full_name)
     clone_path = Path(settings.clone_dir) / str(repo_id)
     clone: GitRepository | None = None
+    slot = threading.current_thread().name
+    progress = run.progress
+    progress.start_work(slot, full_name)
     try:
         if status is RepositoryStatus.MINED and mined_head and not options.force:
+            progress.work_phase(slot, "checking remote HEAD")
             current_head = remote_head(url, settings.git_timeout_seconds)
             if current_head == mined_head:
                 logger.info("%s unchanged since last mining (%s)", full_name, mined_head[:12])
@@ -282,10 +299,14 @@ def _mine_locked(
         if cancellation.aborting.is_set():
             return MiningOutcome.INTERRUPTED
         logger.info("Cloning %s", full_name)
+        progress.work_phase(slot, "clone")
         clone = GitRepository.clone(url, clone_path, settings.git_timeout_seconds)
-        extraction = extract_repository(clone, study.mining)
+        extraction = extract_repository(
+            clone, study.mining, lambda phase, detail: progress.work_phase(slot, phase, detail)
+        )
         if cancellation.aborting.is_set():
             return MiningOutcome.INTERRUPTED
+        progress.work_phase(slot, "saving", f"{len(extraction.versions):,} versions")
         with session_factory() as session, session.begin():
             persist_extraction(session, repo_id, extraction)
             session.execute(
@@ -295,7 +316,7 @@ def _mine_locked(
                     status=RepositoryStatus.MINED,
                     mined_head_sha=extraction.head_sha,
                     mined_at=datetime.now(UTC),
-                    mined_run_id=run_id,
+                    mined_run_id=run.id,
                     last_error=None,
                     attempts=Repository.attempts + 1,
                 )
@@ -328,7 +349,9 @@ def _mine_locked(
         return MiningOutcome.FAILED
     finally:
         if clone is not None and not options.keep_clones:
+            progress.work_phase(slot, "removing clone")
             clone.remove()
+        progress.end_work(slot)
 
 
 def persist_extraction(session: Session, repo_id: int, extraction: Extraction) -> None:

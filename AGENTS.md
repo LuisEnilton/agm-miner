@@ -93,10 +93,12 @@ Princípios que precisam ser mantidos:
    Um código novo que grave estado precisa manter essas propriedades.
 
    **Progresso:** estágios reportam o que fazem pelo `run.progress` (`progress.Progress`: fase,
-   espera, contadores, workers), nunca imprimindo direto. `track_run` grava o snapshot, as stats e
-   `heartbeat_at` a cada `HEARTBEAT_SECONDS`; `agm status` lê isso e, com `progress_view`,
-   renderiza o mesmo painel em qualquer terminal. Execução `RUNNING` com heartbeat antigo é
-   `stale` (processo morto).
+   espera, contadores, workers), nunca imprimindo direto. Esperas da API passam por
+   `GitHubClient.observe_waits`; funções sem banco recebem callbacks (`extract_repository(...,
+   on_phase)`, `prefetch_blobs(..., on_batch)`, `export_table(..., on_rows)`). `track_run`
+   publica o progresso no processo (`progress.publishing`, lido pelo painel do CLI) e grava o
+   snapshot, as stats e `heartbeat_at` a cada `HEARTBEAT_SECONDS` (lido pelo `agm status`). As
+   duas visões usam `progress_view`. Execução `RUNNING` com heartbeat antigo é `stale`.
 9. **`agm run` só agenda**: cada estágio roda como processo `agm <estágio>` (sessão própria),
    e o supervisor repassa cada sinal recebido uma única vez (`_Child.deliver_signals`). Não mova
    a lógica de estágio para dentro do orquestrador; garantias novas vão para os comandos.

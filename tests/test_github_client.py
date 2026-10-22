@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -123,6 +124,34 @@ def test_retries_transient_errors_with_bounded_attempts(make_client) -> None:
         client.graphql("query { viewer { login } }")
     assert len(requester.calls) == 3
     assert [s for s in clock.sleeps if s >= 30] == [30.0, 60.0]
+
+
+def test_every_wait_is_reported_with_its_reason(make_client) -> None:
+    low = {"X-RateLimit-Remaining": "1", "X-RateLimit-Reset": "1100"}
+    limited = RateLimitExceededException(
+        403, {"message": "You have exceeded a secondary rate limit"}, {"Retry-After": "30"}
+    )
+    client, _, clock = make_client(
+        [(low, search_page(0)), limited, ({}, search_page(0))],
+        RATE_LIMIT_SLEEP_BUFFER_SECONDS=5,
+    )
+    waits: list[tuple[str, float]] = []
+
+    @contextmanager
+    def observe(reason: str, seconds: float):
+        waits.append((reason, seconds))
+        yield
+
+    client.observe_waits(observe)
+    client.search_code("q", page=1)
+    client.search_code("q", page=2)
+
+    reasons = [reason for reason, _ in waits]
+    assert any("quota low (1 left)" in reason for reason in reasons)
+    assert any("failed with 403; retry 1/" in reason for reason in reasons)
+    assert any("pacing (6.5s between requests)" in reason for reason in reasons)
+    # The observer sees exactly the sleeps the client makes.
+    assert [seconds for _, seconds in waits] == clock.sleeps
 
 
 def test_does_not_retry_client_errors(make_client) -> None:

@@ -16,6 +16,7 @@ import json
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -42,6 +43,12 @@ class Settings(BaseSettings):
     github_max_retries: int = Field(default=5, alias="GITHUB_MAX_RETRIES")
 
     git_timeout_seconds: int = Field(default=1800, alias="GIT_TIMEOUT_SECONDS")
+
+    # How commands show their progress: "live" panel, "plain" periodic log lines, "off", or
+    # "auto" (live in an interactive terminal, plain otherwise).
+    progress_mode: Literal["auto", "live", "plain", "off"] = Field(
+        default="auto", alias="AGM_PROGRESS"
+    )
 
     @property
     def bronze_dir(self) -> Path:

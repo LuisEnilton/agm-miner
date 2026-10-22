@@ -22,6 +22,28 @@ def _iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, UTC).isoformat()
 
 
+_published: list[Progress] = []
+_published_lock = threading.Lock()
+
+
+@contextmanager
+def publishing(progress: Progress) -> Iterator[Progress]:
+    """Make ``progress`` visible to this process's live display while the block runs."""
+    with _published_lock:
+        _published.append(progress)
+    try:
+        yield progress
+    finally:
+        with _published_lock:
+            _published.remove(progress)
+
+
+def published() -> list[Progress]:
+    """Progress of the stages currently running in this process."""
+    with _published_lock:
+        return list(_published)
+
+
 class Progress:
     """Progress of one stage run.
 

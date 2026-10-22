@@ -223,3 +223,65 @@ def test_status_reports_running_and_stale_runs(session_factory) -> None:
         "DISCOVER": True,
         "EXPORT": False,
     }
+
+
+def test_render_pipeline() -> None:
+    from agm_miner.progress_view import render_pipeline
+
+    clock = Clock()
+    progress = Progress("MINE", clock=clock)
+    progress.set_total("repositories", 2)
+    progress.advance("repositories")
+    mine = PipelineRun(
+        id=5,
+        stage=RunStage.MINE,
+        status=RunStatus.RUNNING,
+        progress=progress.snapshot(),
+        heartbeat_at=T0,
+        stats={},
+    )
+    output = text(
+        render_pipeline(
+            {"mine": 100, "analyze": 101, "select": 102},
+            {"mine": mine},
+            {"SELECTED": 3},
+            now=T0 + timedelta(seconds=10),
+        )
+    )
+    assert "mine #5" in output and "1/2 (50%)" in output
+    assert "analyze" in output and "its progress is not saved (no database)" in output
+    assert "select" in output and "starting…" in output
+    assert "repositories: SELECTED 3" in output
+
+
+def test_console_writer_prints_each_line() -> None:
+    from agm_miner.progress_view import ConsoleWriter
+
+    console = Console(record=True, width=80, color_system=None)
+    writer = ConsoleWriter(console)
+    writer.write("[mine] one\n[mine] [bold]two[/bold]\n")
+    assert console.export_text() == "[mine] one\n[mine] [bold]two[/bold]\n"
+
+
+def test_pipeline_panel_tells_finishing_from_starting() -> None:
+    from agm_miner.progress_view import PipelinePanel
+
+    mine = PipelineRun(
+        id=5,
+        stage=RunStage.MINE,
+        status=RunStatus.RUNNING,
+        progress=Progress("MINE").snapshot(),
+        heartbeat_at=datetime.now(UTC),
+        stats={},
+    )
+    state = {"runs": {"mine": mine}}
+    panel = PipelinePanel(
+        lambda: {"mine": 100, "select": 101},
+        lambda children: state["runs"],
+        lambda: {},
+    )
+    first = text(panel())
+    assert "mine #5" in first and "starting…" in first  # select has no run yet
+    state["runs"] = {}  # mine's run ended; its process is still exiting
+    second = text(panel())
+    assert "finishing…" in second and "starting…" in second

@@ -6,11 +6,12 @@ The same renderer serves the live panel of a running command, ``agm status`` and
 
 from __future__ import annotations
 
+import io
 import logging
 import sys
 import threading
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TextIO
@@ -37,6 +38,7 @@ class RunView:
     stale: bool = False
     heartbeat_at: datetime | None = None
     stats: Mapping[str, Any] = field(default_factory=dict)
+    note: str | None = None
 
 
 def run_view(run: PipelineRun, now: datetime | None = None) -> RunView:
@@ -100,6 +102,8 @@ def render_run(view: RunView, now: datetime | None = None) -> RenderableType:
         title.append(f"  pid {snapshot['pid']}@{snapshot.get('host', '?')}", style="dim")
     parts: list[RenderableType] = [title]
 
+    if view.note:
+        parts.append(Text(f"  {view.note}", style="dim"))
     if view.stale:
         silent = (now - view.heartbeat_at).total_seconds() if view.heartbeat_at else None
         since = f"for {format_duration(silent)}" if silent is not None else "since it started"
@@ -269,3 +273,101 @@ def showing_progress(
     finally:
         stopped.set()
         reporter.join(timeout=1)
+
+
+# --------------------------------------------------------------------------- agm run
+
+
+def render_pipeline(
+    children: Mapping[str, int],
+    runs: Mapping[str, PipelineRun],
+    repository_counts: Mapping[str, int],
+    now: datetime | None = None,
+    *,
+    finished: frozenset[int] = frozenset(),
+) -> RenderableType:
+    """Panel of ``agm run``: each child stage with the progress its run saved in the database.
+
+    ``finished`` holds the pids of children whose run already ended (the process is exiting).
+    """
+    views = []
+    for stage in sorted(children):
+        run = runs.get(stage)
+        if run is not None:
+            views.append(run_view(run, now))
+        elif stage == "analyze":
+            views.append(RunView(stage, None, note="its progress is not saved (no database)"))
+        elif children[stage] in finished:
+            views.append(RunView(stage, None, note="finishing…"))
+        else:
+            views.append(RunView(stage, None, note="starting…"))
+    return render_status(views, repository_counts, now)
+
+
+class PipelinePanel:
+    """Live panel of ``agm run``, built from the supervisor's children and the database."""
+
+    def __init__(
+        self,
+        children: Callable[[], Mapping[str, int]],
+        runs: Callable[[Mapping[str, int]], Mapping[str, PipelineRun]],
+        counts: Callable[[], Mapping[str, int]],
+    ) -> None:
+        self._children = children
+        self._runs = runs
+        self._counts = counts
+        self._seen: set[int] = set()  # pids of children that had a running run
+
+    def __call__(self) -> RenderableType:
+        children = self._children()
+        runs = self._runs(children)
+        self._seen.update(children[stage] for stage in runs)
+        finished = frozenset(pid for pid in children.values() if pid in self._seen) - {
+            children[stage] for stage in runs
+        }
+        return render_pipeline(children, runs, self._counts(), finished=finished)
+
+
+class ConsoleWriter(io.TextIOBase):
+    """Text stream that prints through a rich console, so lines written while a live panel is
+    shown scroll above it (used for the children's output in ``agm run``)."""
+
+    def __init__(self, console: Console) -> None:
+        super().__init__()
+        self._console = console
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        for line in text.splitlines():
+            self._console.print(line, markup=False, highlight=False, soft_wrap=True)
+        return len(text)
+
+
+class _Refreshing:
+    """Renderable built by ``build``; keeps the last good frame if building fails (e.g. the
+    database is briefly unreachable), so the panel never crashes the command."""
+
+    def __init__(self, build: Callable[[], RenderableType]) -> None:
+        self._build = build
+        self._last: RenderableType = Text("starting…", style="dim")
+
+    def __call__(self) -> RenderableType:
+        with suppress(Exception):
+            self._last = self._build()
+        return self._last
+
+
+@contextmanager
+def live_panel(
+    build: Callable[[], RenderableType], console: Console, refresh_per_second: float = 1
+) -> Iterator[None]:
+    """Show ``build()`` as a live panel (refreshed in the background) while the block runs."""
+    with Live(
+        get_renderable=_Refreshing(build),
+        console=console,
+        refresh_per_second=refresh_per_second,
+        transient=True,
+    ):
+        yield

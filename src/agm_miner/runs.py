@@ -10,7 +10,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -21,8 +21,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from agm_miner.config import StudyConfig
 from agm_miner.database.models import PipelineRun, RunStage, RunStatus
+from agm_miner.progress import Progress
 
 logger = logging.getLogger(__name__)
+
+# How often a running stage saves its progress and stats. A RUNNING run whose heartbeat is older
+# than STALE_AFTER gave no sign of life: its process was most likely killed (kill -9, crash).
+HEARTBEAT_SECONDS = 5.0
+STALE_AFTER = timedelta(seconds=3 * HEARTBEAT_SECONDS)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -56,6 +62,7 @@ class RunContext:
     id: int
     stage: RunStage
     stats: dict[str, Any] = field(default_factory=dict)
+    progress: Progress = field(default_factory=Progress)
 
     def increment(self, key: str, amount: int = 1) -> None:
         self.stats[key] = self.stats.get(key, 0) + amount
@@ -67,9 +74,17 @@ def track_run(
     stage: RunStage,
     study: StudyConfig,
     params: dict[str, Any] | None = None,
+    *,
+    heartbeat_seconds: float = HEARTBEAT_SECONDS,
 ) -> Iterator[RunContext]:
     """Record a pipeline run; the row ends as SUCCEEDED, INTERRUPTED (Ctrl+C / SIGTERM) or
-    FAILED (with the error). A process killed with SIGKILL leaves the row RUNNING."""
+    FAILED (with the error).
+
+    While the run is alive, its progress, stats and a heartbeat are saved every
+    ``heartbeat_seconds`` (``agm status`` reads them). A process killed with SIGKILL leaves the
+    row RUNNING with an old heartbeat, which ``agm status`` reports as stale.
+    """
+    progress = Progress(stage.value)
     with session_factory() as session, session.begin():
         run = PipelineRun(
             stage=stage,
@@ -79,21 +94,81 @@ def track_run(
             study_config=study.snapshot(),
             params=params or {},
             stats={},
+            progress=progress.snapshot(),
+            heartbeat_at=datetime.now(UTC),
         )
         session.add(run)
         session.flush()
-        context = RunContext(id=run.id, stage=stage)
+        context = RunContext(id=run.id, stage=stage, progress=progress)
     logger.info("Started %s run %s", stage.value, context.id)
 
+    heartbeat = _Heartbeat(session_factory, context, heartbeat_seconds)
+    heartbeat.start()
     try:
         yield context
     except KeyboardInterrupt:
+        heartbeat.stop()
         _finish(session_factory, context, RunStatus.INTERRUPTED)
         raise
     except BaseException as exc:
+        heartbeat.stop()
         _finish(session_factory, context, RunStatus.FAILED, error=repr(exc))
         raise
+    heartbeat.stop()
     _finish(session_factory, context, RunStatus.SUCCEEDED)
+
+
+class _Heartbeat(threading.Thread):
+    """Save the run's progress, stats and heartbeat periodically (its own session)."""
+
+    def __init__(
+        self, session_factory: sessionmaker[Session], context: RunContext, interval: float
+    ) -> None:
+        super().__init__(name=f"heartbeat-{context.id}", daemon=True)
+        self._session_factory = session_factory
+        self._context = context
+        self._interval = interval
+        self._stopped = threading.Event()
+
+    def run(self) -> None:
+        while not self._stopped.wait(self._interval):
+            try:
+                _save_progress(self._session_factory, self._context)
+            except Exception:  # a lost heartbeat must never stop the stage
+                logger.warning("Could not save the progress of run %s", self._context.id)
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self.join(timeout=self._interval + 5)
+
+
+def _save_progress(session_factory: sessionmaker[Session], context: RunContext) -> None:
+    with session_factory() as session, session.begin():
+        run = session.get(PipelineRun, context.id)
+        run.progress = context.progress.snapshot()
+        run.stats = dict(context.stats)
+        run.heartbeat_at = datetime.now(UTC)
+
+
+def running_runs(session_factory: sessionmaker[Session]) -> list[PipelineRun]:
+    """Runs still marked RUNNING (alive or stale), oldest first."""
+    with session_factory() as session:
+        return list(
+            session.scalars(
+                select(PipelineRun)
+                .where(PipelineRun.status == RunStatus.RUNNING)
+                .order_by(PipelineRun.id)
+            )
+        )
+
+
+def is_stale(run: PipelineRun, now: datetime | None = None) -> bool:
+    """A RUNNING run that stopped giving signs of life (its process is most likely gone)."""
+    if run.status is not RunStatus.RUNNING:
+        return False
+    if run.heartbeat_at is None:  # recorded before heartbeats existed
+        return True
+    return (now or datetime.now(UTC)) - run.heartbeat_at > STALE_AFTER
 
 
 def _finish(
@@ -107,6 +182,8 @@ def _finish(
         run.status = status
         run.finished_at = datetime.now(UTC)
         run.stats = dict(context.stats)
+        run.progress = context.progress.snapshot()
+        run.heartbeat_at = run.finished_at
         run.error = error
     logger.info("Finished %s run %s: %s %s", context.stage.value, context.id, status, context.stats)
 

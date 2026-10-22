@@ -107,7 +107,8 @@ Um repositório nunca fica pela metade no banco: ou todos os dados dele são gra
 
 Se o processo for morto sem chance de reagir (`kill -9`, queda de energia), os dados continuam
 consistentes pelo mesmo motivo. A única diferença é que a execução fica como `RUNNING` em
-`agm runs list`. Basta rodar o comando de novo.
+`agm runs list`, com `"stale": true`, e o `agm status` a mostra como "no sign of life". Basta
+rodar o comando de novo.
 
 ### Posso rodar em dois terminais?
 
@@ -133,9 +134,38 @@ poetry run agm select
 poetry run agm mine --workers 4
 
 # Em qualquer terminal: acompanhe o andamento
+poetry run agm status --watch # o que está rodando agora e em que ponto (atualiza ao vivo)
 poetry run agm runs list      # execuções, status (RUNNING/SUCCEEDED/INTERRUPTED/FAILED) e estatísticas
 poetry run agm runs funnel    # quantos repositórios em cada status e por que foram rejeitados
 ```
+
+### Acompanhando o progresso
+
+Enquanto roda, todo estágio que grava em `pipeline_runs` (`discover`, `select`, `mine`, `export`)
+salva no banco, a cada 5 segundos, o seu progresso, as estatísticas parciais e um sinal de vida
+(`heartbeat_at`). Por isso dá para acompanhar de qualquer terminal, ou de outra máquina que use o
+mesmo banco:
+
+```bash
+poetry run agm status            # mostra uma vez
+poetry run agm status --watch    # atualiza a cada 2 s até Ctrl+C (--interval muda o intervalo)
+poetry run agm status --json     # o mesmo em JSON, para scripts
+```
+
+Para cada execução em andamento, o `agm status` mostra:
+- o estágio, há quanto tempo roda e o pid/host do processo;
+- o que está fazendo e, quando está parado, por quê (por exemplo, esperando a quota da API);
+- contadores com total, porcentagem, taxa por minuto e tempo estimado;
+- o que cada worker está processando, em que fase e há quanto tempo.
+
+No fim aparecem as contagens de repositórios por status.
+
+Uma execução `RUNNING` sem sinal de vida há mais de 15 segundos aparece como **"no sign of life:
+the process was most likely killed"**. Isso acontece depois de um `kill -9`, de uma queda de
+energia ou de um processo que travou. O `agm runs list` mostra o mesmo com o campo `stale`. Os
+dados continuam consistentes; basta rodar o comando de novo.
+
+O `analyze` não aparece no `agm status`, porque não usa o banco.
 
 ### Coleta automática com `agm run`
 

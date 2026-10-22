@@ -122,6 +122,10 @@ class PipelineRun(Base):
     params: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     stats: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+    # Operational state written periodically while the run is alive (see runs.track_run):
+    # the live progress snapshot and the last time the process gave a sign of life.
+    progress: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DiscoverySlice(Base):

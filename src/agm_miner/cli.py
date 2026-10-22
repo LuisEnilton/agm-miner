@@ -7,6 +7,7 @@ agm mine                mine selected repositories from git clones (stage 3)
 agm export              dump the database as a bronze Parquet dataset (stage 4)
 agm analyze             build silver/gold analysis datasets from a bronze export (stage 5)
 agm run                 run stages 1-3 in parallel until done, then 4 and 5
+agm status              what is running now and how far it got (also from another terminal)
 agm runs list|funnel    inspect pipeline runs and the selection funnel
 """
 
@@ -300,10 +301,76 @@ def run(
         raise typer.Exit(code=result.exit_code)
 
 
+@app.command()
+@_handle_errors
+def status(
+    watch: Annotated[
+        bool, typer.Option("--watch", "-w", help="Keep refreshing until Ctrl+C.")
+    ] = False,
+    interval: Annotated[
+        float, typer.Option(min=0.5, help="Seconds between refreshes with --watch.")
+    ] = 2.0,
+    json_output: Annotated[bool, typer.Option("--json", help="Print JSON instead.")] = False,
+) -> None:
+    """What is running now, how far it got and what each worker is doing.
+
+    Reads the progress that running stages save in the database every few seconds, so it works
+    from any terminal (or machine) pointing to the same database.
+    """
+    import time
+
+    from rich.console import Console
+    from rich.live import Live
+
+    from agm_miner.orchestrator import status_counts
+    from agm_miner.progress_view import render_status, run_view
+    from agm_miner.runs import running_runs
+
+    settings, _ = _context(None)
+    factory = _database(settings)
+
+    def current():
+        views = [run_view(run) for run in running_runs(factory)]
+        return views, status_counts(factory)
+
+    if json_output:
+        views, counts = current()
+        _print(
+            {
+                "running": [
+                    {
+                        "id": view.run_id,
+                        "stage": view.stage,
+                        "stale": view.stale,
+                        "heartbeat_at": view.heartbeat_at,
+                        "progress": view.progress,
+                        "stats": view.stats,
+                    }
+                    for view in views
+                ],
+                "repositories": counts,
+            }
+        )
+        return
+    console = Console()
+    if not watch:
+        console.print(render_status(*current()))
+        return
+    try:
+        with Live(render_status(*current()), console=console, auto_refresh=False) as live:
+            while True:
+                time.sleep(interval)
+                live.update(render_status(*current()), refresh=True)
+    except KeyboardInterrupt:
+        return  # leaving --watch is not an interruption of any work
+
+
 @runs_app.command("list")
 @_handle_errors
 def runs_list(limit: Annotated[int, typer.Option(help="Show the N latest runs.")] = 20) -> None:
     """Latest pipeline runs with their statistics."""
+    from agm_miner.runs import is_stale
+
     settings, _ = _context(None)
     with _database(settings)() as session:
         runs = session.scalars(
@@ -321,6 +388,9 @@ def runs_list(limit: Annotated[int, typer.Option(help="Show the N latest runs.")
                     "study_config_hash": run.study_config_hash[:12],
                     "stats": run.stats,
                     "error": run.error,
+                    "heartbeat_at": run.heartbeat_at,
+                    # RUNNING without a recent heartbeat: the process was most likely killed.
+                    "stale": is_stale(run),
                 }
                 for run in runs
             ]

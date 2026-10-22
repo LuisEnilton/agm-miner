@@ -29,6 +29,7 @@ poetry run agm mine --workers 4     # 3. clone git parcial → commits, versões
 poetry run agm export               # 4. banco → data/bronze/<timestamp>/*.parquet + manifest.json
 poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silver + gold por RQ)
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
+poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
@@ -47,7 +48,9 @@ src/agm_miner/
   config.py           # Settings (.env: infra/segredos) + StudyConfig (study.yaml: metodologia)
   artifacts.py        # FONTE ÚNICA das regras de artefato (classify_path, GIT_PATHSPECS)
   file_categories.py  # categoria de qualquer arquivo (code, test, docs, ci, agent_artifact, ...)
-  runs.py             # track_run(): toda execução vai para pipeline_runs (+ code_version)
+  runs.py             # track_run(): toda execução vai para pipeline_runs (+ code_version, heartbeat)
+  progress.py         # Progress: estado ao vivo de um estágio (fase, espera, contadores, workers)
+  progress_view.py    # renderização (rich) do progresso: painel ao vivo e agm status
   orchestrator.py     # agm run: supervisor que lança `agm <estágio>` como processos filhos
   extraction.py       # clone git → registros brutos (sem banco); os 8 passes estão na docstring
   git/                # runner (subprocess -z, streaming, timeout), parsing (puro), repository
@@ -88,6 +91,12 @@ Princípios que precisam ser mantidos:
    - `export` e `analyze` escrevem em `.partial` e renomeiam no fim.
 
    Um código novo que grave estado precisa manter essas propriedades.
+
+   **Progresso:** estágios reportam o que fazem pelo `run.progress` (`progress.Progress`: fase,
+   espera, contadores, workers), nunca imprimindo direto. `track_run` grava o snapshot, as stats e
+   `heartbeat_at` a cada `HEARTBEAT_SECONDS`; `agm status` lê isso e, com `progress_view`,
+   renderiza o mesmo painel em qualquer terminal. Execução `RUNNING` com heartbeat antigo é
+   `stale` (processo morto).
 9. **`agm run` só agenda**: cada estágio roda como processo `agm <estágio>` (sessão própria),
    e o supervisor repassa cada sinal recebido uma única vez (`_Child.deliver_signals`). Não mova
    a lógica de estágio para dentro do orquestrador; garantias novas vão para os comandos.
@@ -98,7 +107,8 @@ Princípios que precisam ser mantidos:
 ## Modelo de dados ([database/models.py](src/agm_miner/database/models.py))
 
 - `pipeline_runs`: estágio, status (`RUNNING`/`SUCCEEDED`/`FAILED`/`INTERRUPTED`), params, stats,
-  `study_config` (JSONB), `code_version`.
+  `study_config` (JSONB), `code_version`, `progress` (snapshot JSONB) e `heartbeat_at`, os dois
+  atualizados durante a execução.
 - `repositories`: id numérico do GitHub + `node_id` (GraphQL), metadados da seleção
   (`metadata_fetched_at`; `last_commit_at` é a data do commit HEAD do branch default, usada no
   critério de atividade), status `DISCOVERED → SELECTED|REJECTED → MINED|FAILED` e

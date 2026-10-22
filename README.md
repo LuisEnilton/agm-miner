@@ -141,7 +141,36 @@ poetry run agm runs funnel    # quantos repositórios em cada status e por que f
 
 ### Acompanhando o progresso
 
-Enquanto roda, todo estágio que grava em `pipeline_runs` (`discover`, `select`, `mine`, `export`)
+**No terminal do comando.** Num terminal interativo, todo comando de estágio (`discover`,
+`select`, `mine`, `export`, `analyze`) mostra um painel que se atualiza no lugar, com as linhas de
+log rolando acima dele:
+
+```
+mine  running for 1m14s  pid 43079@meu-pc
+  mining 3 repositories with 2 worker(s)
+  repositories  ━━━━━━━━━━━━━━━━━━╸━━━━━━━━━  2/3 (67%)  1.6/min  eta 37s
+  mined                                       2          1.6/min
+    worker      item                          phase             detail          time
+    worker_0    acme/api                      prefetch blobs    500/698 blobs   1m14s
+    worker_1    acme/web                      history           12,000 commits  20s
+```
+
+O que cada estágio mostra:
+
+| Estágio | Contadores | Fase / workers |
+|---|---|---|
+| `discover` | queries; `matches (est.)` = resultados percorridos ÷ total estimado da query (o `total_count` da faixa de tamanho inteira); `unreachable`; repositórios novos | fatia e página atuais; a espera da API em amarelo (pacing de 6,5 s, quota esgotada, retry), com o tempo que falta |
+| `select` | repositórios avaliados / pendentes, selecionados, rejeitados | lote atual; espera da API |
+| `mine` | repositórios concluídos / candidatos, e cada desfecho (`mined`, `failed`, `unchanged`...) | cada worker com o repositório, o passo (`clone`, `authors`, `history`, `prefetch blobs`, `rename lineage`, `line counts`, `commit metadata`, `contents`, `saving`), o detalhe (commits lidos, blobs baixados) e o tempo |
+| `export` | tabelas e linhas (com total, contado no início) | tabela atual |
+| `analyze` | passos (8) e versões analisadas | passo atual |
+
+Quando a saída não é um terminal (redirecionada para um arquivo, `nohup`, CI), não há painel: a
+cada 30 s sai uma linha de resumo no log, por exemplo
+`[mine] · repositories 2/3 · working on acme/api (prefetch blobs)`. A variável `AGM_PROGRESS`
+(no `.env`) força o modo: `auto` (padrão), `live`, `plain` ou `off`.
+
+**De outro terminal.** Enquanto roda, todo estágio que grava em `pipeline_runs` (`discover`, `select`, `mine`, `export`)
 salva no banco, a cada 5 segundos, o seu progresso, as estatísticas parciais e um sinal de vida
 (`heartbeat_at`). Por isso dá para acompanhar de qualquer terminal, ou de outra máquina que use o
 mesmo banco:

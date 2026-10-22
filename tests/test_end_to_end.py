@@ -236,9 +236,9 @@ def test_export_reads_one_consistent_snapshot(session_factory, tmp_path: Path, m
     seen = []
     original = export_module.export_table
 
-    def spy(connection, table, destination):
+    def spy(connection, table, destination, on_rows=None):
         seen.append((id(connection), connection.get_isolation_level(), connection.in_transaction()))
-        return original(connection, table, destination)
+        return original(connection, table, destination, on_rows)
 
     monkeypatch.setattr(export_module, "export_table", spy)
     export_bronze(StudyConfig(), session_factory, tmp_path / "bronze")

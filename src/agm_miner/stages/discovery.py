@@ -77,18 +77,34 @@ def discover_repositories(
             client=client,
             run=run,
         )
+        client.observe_waits(run.progress.waiting)
+        run.progress.set_total("queries", len(selected_queries))
         for query in selected_queries:
             _discover_query(search, query)
+            run.progress.advance("queries")
         return dict(run.stats)
+
+
+# Progress counters. "matches" walks through the estimated population of the current query (the
+# total of its widest size slice): collected pages, resumed slices and unreachable results.
+_MATCHES = "matches (est.)"
+_UNREACHABLE = "unreachable"
+_NEW_REPOSITORIES = "new repositories"
 
 
 def _discover_query(search: _Search, query: str) -> None:
     logger.info("Discovering with query %r", query)
     search.run.increment("queries")
+    progress = search.run.progress
+    progress.set_total(_MATCHES, None)
+    progress.set_done(_MATCHES, 0)
     if _SIZE_QUALIFIER_RE.search(query):
         logger.warning("Query %r already has a size qualifier; size bisection disabled", query)
-        if _progress(search.session_factory, query) is SliceOutcome.COLLECTED:
+        outcome, total = _progress(search.session_factory, query)
+        if outcome is SliceOutcome.COLLECTED:
             search.run.increment("resumed_slices")
+            progress.set_total(_MATCHES, total)
+            progress.advance(_MATCHES, total)
             return
         _collect(search, query, query)
         return
@@ -97,9 +113,14 @@ def _discover_query(search: _Search, query: str) -> None:
 
 def _bisect(search: _Search, base_query: str, low: int, high: int) -> None:
     sliced = f"{base_query} size:{low}..{high}"
-    done = _progress(search.session_factory, sliced)
+    progress = search.run.progress
+    is_root = low == search.config.size_min and high == search.config.size_max
+    done, stored_total = _progress(search.session_factory, sliced)
+    if is_root and done is not None:
+        progress.set_total(_MATCHES, stored_total)
     if done is SliceOutcome.COLLECTED:
         search.run.increment("resumed_slices")
+        progress.advance(_MATCHES, stored_total)
         return
     if done is SliceOutcome.SPLIT:
         middle = (low + high) // 2
@@ -107,8 +128,11 @@ def _bisect(search: _Search, base_query: str, low: int, high: int) -> None:
         _bisect(search, base_query, middle + 1, high)
         return
 
+    progress.set_phase(f"{sliced}: page 1")
     first = search.client.search_code(sliced, page=1, per_page=search.config.page_size)
     search.run.increment("api_requests")
+    if is_root:
+        progress.set_total(_MATCHES, first.total_count)
     if first.total_count >= search.config.max_results_per_query and low < high:
         middle = (low + high) // 2
         logger.info("Splitting %s (%s matches)", sliced, first.total_count)
@@ -126,8 +150,12 @@ def _collect(
     config, run = search.config, search.run
     page = first_page
     if page is None:
+        run.progress.set_phase(f"{query}: page 1")
         page = search.client.search_code(query, page=1, per_page=config.page_size)
         run.increment("api_requests")
+    if query == base_query:
+        # A query with its own size qualifier is not bisected: it is the whole population.
+        run.progress.set_total(_MATCHES, page.total_count)
     if page.total_count > config.max_results_per_query:
         # Only possible for a single-byte size slice or a user-provided size qualifier.
         logger.warning(
@@ -138,6 +166,9 @@ def _collect(
         )
         run.increment("truncated_queries")
         run.increment("unreachable_matches", page.total_count - config.max_results_per_query)
+        unreachable = page.total_count - config.max_results_per_query
+        run.progress.advance(_UNREACHABLE, unreachable)
+        run.progress.advance(_MATCHES, unreachable)
 
     total = page.total_count
     reachable = min(total, config.max_results_per_query)
@@ -147,20 +178,28 @@ def _collect(
         if page.incomplete_results:
             run.increment("incomplete_pages")
         _store_hits(search, base_query, page.hits)
+        run.progress.advance(_MATCHES, len(page.hits))
         number += 1
         if number > pages or not page.hits:
             break
+        run.progress.set_phase(f"{query}: page {number}/{pages}")
         page = search.client.search_code(query, page=number, per_page=config.page_size)
         run.increment("api_requests")
     # Recorded only after every page is stored: an interrupted slice is searched again.
     _record(search, query, base_query, SliceOutcome.COLLECTED, total)
 
 
-def _progress(session_factory: sessionmaker[Session], slice_query: str) -> SliceOutcome | None:
+def _progress(
+    session_factory: sessionmaker[Session], slice_query: str
+) -> tuple[SliceOutcome | None, int]:
+    """Saved outcome and total of a slice (``(None, 0)`` when it was never searched)."""
     with session_factory() as session:
-        return session.scalar(
-            select(DiscoverySlice.outcome).where(DiscoverySlice.slice_query == slice_query)
-        )
+        row = session.execute(
+            select(DiscoverySlice.outcome, DiscoverySlice.total_count).where(
+                DiscoverySlice.slice_query == slice_query
+            )
+        ).first()
+    return (row.outcome, row.total_count) if row else (None, 0)
 
 
 def _record(
@@ -237,3 +276,4 @@ def _store_hits(search: _Search, base_query: str, hits: list[CodeSearchHit]) -> 
         if rows:
             session.execute(insert(DiscoveryHit).values(rows).on_conflict_do_nothing())
     run.increment("new_repositories", len(inserted))
+    run.progress.advance(_NEW_REPOSITORIES, len(inserted))

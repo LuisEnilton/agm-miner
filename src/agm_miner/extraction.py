@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 
@@ -170,7 +171,20 @@ class _AuthorStats:
 # --------------------------------------------------------------------------- extraction
 
 
-def extract_repository(repo: GitRepository, config: MiningConfig) -> Extraction:
+# Called with the pass being run and an optional detail ("12,000 commits", "500/1,980 blobs").
+PhaseCallback = Callable[[str, str | None], None]
+# Long loops report how far they got every this many commits.
+_REPORT_EVERY = 10_000
+
+
+def _ignore_phase(phase: str, detail: str | None) -> None:
+    pass
+
+
+def extract_repository(
+    repo: GitRepository, config: MiningConfig, on_phase: PhaseCallback = _ignore_phase
+) -> Extraction:
+    """Run the passes of the module docstring; ``on_phase`` follows their progress."""
     head_sha = repo.head_sha()
     extraction = Extraction(head_sha=head_sha)
     if head_sha is None:
@@ -182,13 +196,16 @@ def extract_repository(repo: GitRepository, config: MiningConfig) -> Extraction:
         return classify_included(path, excludes)
 
     # 1. authors -------------------------------------------------------------------------
+    on_phase("authors", None)
     repo.enable_mailmap(head_sha, config.prefetch_batch_size)
     author_of: dict[str, str] = {}
     merges: set[str] = set()
     stats: dict[str, _AuthorStats] = defaultdict(_AuthorStats)
     monthly_commits: Counter[date] = Counter()
     monthly_authors: dict[date, set[str]] = defaultdict(set)
-    for commit in repo.iter_compact_log():
+    for count, commit in enumerate(repo.iter_compact_log(), start=1):
+        if count % _REPORT_EVERY == 0:
+            on_phase("authors", f"{count:,} commits")
         key = identity_key(commit.author_name, commit.author_email)
         author_of[commit.sha] = key
         if commit.is_merge:
@@ -227,7 +244,10 @@ def extract_repository(repo: GitRepository, config: MiningConfig) -> Extraction:
     artifact_changes_by_commit: dict[str, list[RawChange]] = {}
     all_changes_by_commit: dict[str, list[RawChange]] = {}
     commit_order: list[str] = []
-    for diff in repo.iter_raw_log():
+    on_phase("history", f"{len(author_of):,} commits")
+    for count, diff in enumerate(repo.iter_raw_log(), start=1):
+        if count % _REPORT_EVERY == 0:
+            on_phase("history", f"{count:,}/{len(author_of):,} commits")
         if diff.sha in merges or not diff.changes:
             continue
         key = author_of[diff.sha]
@@ -255,6 +275,7 @@ def extract_repository(repo: GitRepository, config: MiningConfig) -> Extraction:
             )
 
     # 3. artifacts at HEAD -----------------------------------------------------------------
+    on_phase("artifacts at HEAD", None)
     head_entries = {
         entry.path: entry
         for entry in repo.ls_tree(head_sha)
@@ -289,10 +310,13 @@ def extract_repository(repo: GitRepository, config: MiningConfig) -> Extraction:
         all_changes_by_commit, artifact_changes_by_commit, config.rename_candidate_limit
     )
     repo.prefetch_blobs(
-        {blob for _, blob in version_modes} | candidate_blobs, config.prefetch_batch_size
+        {blob for _, blob in version_modes} | candidate_blobs,
+        config.prefetch_batch_size,
+        on_batch=lambda done, total: on_phase("prefetch blobs", f"{done:,}/{total:,} blobs"),
     )
     lineage: dict[tuple[str, str], RawChange] = dict(exact_renames)
     if rename_commits:
+        on_phase("rename lineage", f"{len(rename_commits):,} commits")
         for diff in repo.iter_diff_tree(
             rename_commits, detect_renames=True, raw=True, numstat=False
         ):
@@ -302,6 +326,7 @@ def extract_repository(repo: GitRepository, config: MiningConfig) -> Extraction:
                     lineage[(diff.sha, change.path)] = change
 
     # 6. numstat of artifact paths -------------------------------------------------------------
+    on_phase("line counts", f"{len(commit_order):,} commits")
     numstat: dict[tuple[str, str], tuple[int | None, int | None]] = {}
     for diff in repo.iter_diff_tree(
         commit_order, detect_renames=False, raw=False, numstat=True, pathspecs=GIT_PATHSPECS
@@ -310,6 +335,7 @@ def extract_repository(repo: GitRepository, config: MiningConfig) -> Extraction:
             numstat[(diff.sha, entry.path)] = (entry.additions, entry.deletions)
 
     # 7. full commit metadata ------------------------------------------------------------------
+    on_phase("commit metadata", f"{len(commit_order):,} commits")
     for commit in repo.iter_full_commits(commit_order):
         extraction.commits.append(
             CommitRecord(
@@ -365,6 +391,7 @@ def extract_repository(repo: GitRepository, config: MiningConfig) -> Extraction:
 
     # 8. contents ------------------------------------------------------------------------------
     blobs_needed = sorted({blob for _, blob in version_modes})
+    on_phase("contents", f"{len(blobs_needed):,} blobs")
     contents = {blob.sha: blob for blob in repo.read_blobs(blobs_needed)}
     for (path, blob_sha), mode in sorted(version_modes.items()):
         blob = contents.get(blob_sha)

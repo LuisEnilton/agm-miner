@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -187,12 +187,20 @@ class GitRepository:
 
     # ------------------------------------------------------------------ blobs
 
-    def prefetch_blobs(self, shas: Iterable[str], batch_size: int) -> None:
+    def prefetch_blobs(
+        self,
+        shas: Iterable[str],
+        batch_size: int,
+        on_batch: Callable[[int, int], None] | None = None,
+    ) -> None:
         """Download missing blobs from the promisor remote in batches (one round trip per batch
-        instead of one per object, which is what lazy fetching would do)."""
+        instead of one per object, which is what lazy fetching would do). ``on_batch(done,
+        total)`` is called before each batch."""
         missing = self._missing_objects(shas)
         for start in range(0, len(missing), batch_size):
             batch = missing[start : start + batch_size]
+            if on_batch is not None:
+                on_batch(start, len(missing))
             self.git.run(
                 [
                     "-c",

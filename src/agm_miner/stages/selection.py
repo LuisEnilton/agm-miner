@@ -249,11 +249,17 @@ def select_repositories(
             if limit is not None:
                 query = query.limit(limit)
             pending = session.execute(query).all()
+        client.observe_waits(run.progress.waiting)
+        run.progress.set_total("repositories", len(pending))
         batch_size = study.selection.graphql_batch_size
         for start in range(0, len(pending), batch_size):
             batch = pending[start : start + batch_size]
+            run.progress.set_phase(
+                f"fetching metadata of repositories {start + 1}-{start + len(batch)}"
+            )
             metadata = fetch_metadata(client, [node_id for _, node_id, _ in batch])
             _apply(session_factory, batch, metadata, study.selection, reference, run)
+            run.progress.advance("repositories", len(batch))
         return dict(run.stats)
 
 
@@ -312,6 +318,7 @@ def _apply(
             values["metadata_fetched_at"] = fetched_at
             session.execute(update(Repository).where(Repository.id == repo_id).values(**values))
             run.increment("selected" if reason is None else "rejected")
+            run.progress.advance("selected" if reason is None else "rejected")
             if reason is not None:
                 run.increment(f"rejected:{reason.split(':', 1)[0]}")
 

@@ -152,6 +152,9 @@ class FakeGraphQL:
         self.by_name = by_name or {}
         self.calls: list[dict[str, Any]] = []
 
+    def observe_waits(self, observer) -> None:
+        pass  # the fake never waits
+
     def graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(variables)
         if "ids" in variables:
@@ -269,7 +272,10 @@ def test_legacy_node_ids_are_matched_by_position(session_factory) -> None:
     with session_factory() as session, session.begin():
         session.add(Repository(id=1, node_id="MDEwOlJlcG9zaXRvcnkx", full_name="org/repo1"))
 
-    class Canonicalising:
+    class Canonicalising(FakeGraphQL):
+        def __init__(self) -> None:
+            super().__init__({})
+
         def graphql(self, query, variables):
             assert variables == {"ids": ["MDEwOlJlcG9zaXRvcnkx"]}
             return {"data": {"nodes": [node(1, id="R_kgDOAAAAAQ")]}}

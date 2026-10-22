@@ -6,17 +6,24 @@ The same renderer serves the live panel of a running command, ``agm status`` and
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import logging
+import sys
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TextIO
 
-from rich.console import Group, RenderableType
+from rich.console import Console, Group, RenderableType
+from rich.live import Live
+from rich.logging import RichHandler
 from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 
 from agm_miner.database.models import PipelineRun
+from agm_miner.progress import published
 from agm_miner.runs import is_stale
 
 
@@ -162,3 +169,103 @@ def render_status(
         )
         parts.append(footer)
     return Group(*parts)
+
+
+def summary_line(snapshot: Mapping[str, Any]) -> str:
+    """One log line with the essentials of a snapshot (for logs written to files or pipes)."""
+    parts = [f"[{str(snapshot.get('stage', '')).lower()}]"]
+    for name, counter in (snapshot.get("counters") or {}).items():
+        done, total = counter.get("done") or 0, counter.get("total")
+        parts.append(f"{name} {done:,}/{total:,}" if total else f"{name} {done:,}")
+    workers = snapshot.get("workers") or []
+    if workers:
+        busy = ", ".join(
+            f"{worker.get('label')} ({worker.get('phase') or 'starting'})" for worker in workers
+        )
+        parts.append(f"working on {busy}")
+    elif snapshot.get("phase"):
+        parts.append(str(snapshot["phase"]))
+    waiting = snapshot.get("waiting")
+    if waiting:
+        parts.append(f"waiting: {waiting['reason']}")
+    return " · ".join(parts)
+
+
+# --------------------------------------------------------------------------- terminal output
+
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+# In "plain" mode, how often a summary line of every running stage is logged.
+PLAIN_SUMMARY_SECONDS = 30.0
+
+_summary_logger = logging.getLogger("agm_miner.progress")
+
+
+def resolve_mode(mode: str, stream: TextIO | None = None) -> str:
+    """``auto`` becomes ``live`` in an interactive terminal and ``plain`` otherwise."""
+    if mode != "auto":
+        return mode
+    stream = stream or sys.stderr
+    return "live" if stream.isatty() else "plain"
+
+
+def configure_logging(level: str, mode: str) -> Console | None:
+    """Set up logging for ``mode``; in ``live`` mode, log lines scroll above the panel and the
+    returned console is the one the panel must use."""
+    if mode == "live":
+        console = Console(stderr=True)
+        handler = RichHandler(console=console, show_path=False, markup=False)
+        logging.basicConfig(level=level, format="%(message)s", handlers=[handler], force=True)
+        return console
+    logging.basicConfig(level=level, format=LOG_FORMAT)
+    return None
+
+
+class _LiveView:
+    """Renderable of the stages running in this process, for ``rich.live.Live``."""
+
+    def __init__(self) -> None:
+        self._shown = False
+
+    def __call__(self) -> RenderableType:
+        progresses = published()
+        if not progresses:
+            return Text("finishing…" if self._shown else "starting…", style="dim")
+        self._shown = True
+        return render_status([RunView(p.stage, p.snapshot()) for p in progresses])
+
+
+@contextmanager
+def showing_progress(
+    mode: str,
+    console: Console | None = None,
+    *,
+    summary_seconds: float = PLAIN_SUMMARY_SECONDS,
+) -> Iterator[None]:
+    """Show the progress of the stages running in this process while the block runs: a live
+    panel (``live``), a summary log line every ``summary_seconds`` (``plain``) or nothing."""
+    if mode == "live":
+        with Live(
+            get_renderable=_LiveView(),
+            console=console or Console(stderr=True),
+            refresh_per_second=2,
+            transient=True,
+        ):
+            yield
+        return
+    if mode != "plain":
+        yield
+        return
+    stopped = threading.Event()
+
+    def report() -> None:
+        while not stopped.wait(summary_seconds):
+            for progress in published():
+                _summary_logger.info("%s", summary_line(progress.snapshot()))
+
+    reporter = threading.Thread(target=report, name="progress-summary", daemon=True)
+    reporter.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        reporter.join(timeout=1)

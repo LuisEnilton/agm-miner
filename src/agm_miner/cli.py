@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import functools
 import json
-import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, ParamSpec, TypeVar
+from typing import Annotated, Any, ParamSpec, TypeVar
 
 import typer
 from sqlalchemy import select
@@ -46,14 +46,28 @@ StudyOption = Annotated[
 ]
 
 
+# How the running command shows its progress (set up by _context from AGM_PROGRESS).
+_output: dict[str, Any] = {"mode": "off", "console": None}
+
+
 def _context(study_path: Path | None) -> tuple[Settings, StudyConfig]:
+    from agm_miner.progress_view import configure_logging, resolve_mode
+
     settings = get_settings()
-    logging.basicConfig(
-        level=settings.log_level.upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    mode = resolve_mode(settings.progress_mode)
+    _output["mode"] = mode
+    _output["console"] = configure_logging(settings.log_level.upper(), mode)
     study = load_study_config(study_path or settings.study_config_path)
     return settings, study
+
+
+@contextmanager
+def _showing_progress() -> Iterator[None]:
+    """Live panel (interactive terminal) or periodic summary lines while a stage runs."""
+    from agm_miner.progress_view import showing_progress
+
+    with showing_progress(_output["mode"], _output["console"]):
+        yield
 
 
 def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
@@ -129,15 +143,11 @@ def discover(
     from agm_miner.stages.discovery import discover_repositories
 
     settings, study = _context(study_path)
-    _print(
-        discover_repositories(
-            study,
-            _database(settings),
-            _github_client(settings),
-            query,
-            restart=restart,
+    with _showing_progress():
+        result = discover_repositories(
+            study, _database(settings), _github_client(settings), query, restart=restart
         )
-    )
+    _print(result)
 
 
 @app.command("select")
@@ -153,15 +163,15 @@ def select_command(
     from agm_miner.stages.selection import select_repositories
 
     settings, study = _context(study_path)
-    _print(
-        select_repositories(
+    with _showing_progress():
+        result = select_repositories(
             study,
             _database(settings),
             _github_client(settings),
             reevaluate=reevaluate,
             limit=limit,
         )
-    )
+    _print(result)
 
 
 @app.command("add-repo")
@@ -207,7 +217,9 @@ def mine(
         force=force,
         keep_clones=keep_clones,
     )
-    _print(mine_repositories(settings, study, _database(settings), options))
+    with _showing_progress():
+        result = mine_repositories(settings, study, _database(settings), options)
+    _print(result)
 
 
 @app.command()
@@ -222,7 +234,8 @@ def export(
     from agm_miner.stages.export import export_bronze
 
     settings, study = _context(study_path)
-    destination = export_bronze(study, _database(settings), output or settings.bronze_dir)
+    with _showing_progress():
+        destination = export_bronze(study, _database(settings), output or settings.bronze_dir)
     typer.echo(str(destination))
 
 
@@ -239,12 +252,15 @@ def analyze(
 ) -> None:
     """Stage 5: build silver/gold datasets for the research questions (no database needed)."""
     from agm_miner.analysis.datasets import build_datasets
+    from agm_miner.progress import Progress, publishing
     from agm_miner.stages.export import latest_export
 
     settings, study = _context(study_path)
     bronze_dir = bronze or latest_export(settings.bronze_dir)
     output_dir = output or settings.gold_dir / bronze_dir.name
-    _print({"output": str(output_dir), **build_datasets(bronze_dir, output_dir, study.analysis)})
+    with publishing(Progress("ANALYZE")) as progress, _showing_progress():
+        counts = build_datasets(bronze_dir, output_dir, study.analysis, progress)
+    _print({"output": str(output_dir), **counts})
 
 
 @app.command()

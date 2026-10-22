@@ -215,9 +215,18 @@ um a partir dos status no banco:
 4. quando a busca termina e não sobra nada para selecionar nem minerar, roda `export` e depois
    `analyze`.
 
-A saída de cada estágio aparece com um prefixo (`[discover]`, `[select]`, `[mine]`...). A cada
-`--status-interval` segundos, uma linha `[run] status: ...` mostra quantos repositórios há em cada
-status e quais estágios estão rodando. No fim, é impresso um resumo em JSON.
+A saída de cada estágio aparece com um prefixo (`[discover]`, `[select]`, `[mine]`...).
+
+- **Num terminal interativo**, embaixo dessa saída fica um painel ao vivo, com o progresso de cada
+  estágio em andamento (o mesmo do `agm status`: contadores, espera da API, workers do `mine`) e as
+  contagens de repositórios por status. Os estágios gravam o progresso no banco, e o painel lê de lá.
+  O `analyze` aparece no painel, mas sem progresso, porque não usa o banco.
+- **Sem terminal** (saída redirecionada para um arquivo, por exemplo), a cada `--status-interval`
+  segundos sai uma linha `[run] status: ...` com as contagens e os estágios rodando, seguida de uma
+  linha `[run] progress [mine] · repositories 12/40 · working on ...` por estágio. Essas linhas
+  também saem durante o export e o analyze.
+
+No fim, é impresso um resumo em JSON.
 
 Como tudo é feito pelos comandos individuais, todas as garantias acima continuam valendo:
 

@@ -101,7 +101,10 @@ Princípios que precisam ser mantidos:
    duas visões usam `progress_view`. Execução `RUNNING` com heartbeat antigo é `stale`.
 9. **`agm run` só agenda**: cada estágio roda como processo `agm <estágio>` (sessão própria),
    e o supervisor repassa cada sinal recebido uma única vez (`_Child.deliver_signals`). Não mova
-   a lógica de estágio para dentro do orquestrador; garantias novas vão para os comandos.
+   a lógica de estágio para dentro do orquestrador; garantias novas vão para os comandos. Os
+   filhos rodam com `AGM_PROGRESS=off`; o supervisor mostra o progresso deles lendo do banco
+   (`child_runs`, casando pelo pid salvo no snapshot), no painel (`PipelinePanel`) ou nas linhas
+   de status.
 10. **Concorrência**: `discover` e `select` são de instância única (`runs.exclusive_stage`, lock
    consultivo de duas chaves). `mine` aceita vários processos (lock por repositório). `export` lê
    num único snapshot `REPEATABLE READ`.

@@ -181,3 +181,35 @@ def test_analysis_needs_a_fresh_export(session_factory, workdir, monkeypatch) ->
         output=io.StringIO(),
     )
     assert result.stages == []
+
+
+def test_children_leave_progress_display_to_the_supervisor(
+    session_factory, workdir, monkeypatch
+) -> None:
+    """Children run with AGM_PROGRESS=off; the supervisor logs their progress, read from the
+    run each child saved in the database."""
+    behave(monkeypatch, discover={"repositories": 2}, mine={"report_progress": 1.0})
+    output = io.StringIO()
+    result = run_pipeline(
+        session_factory,
+        options(status_interval=0.2, export=False),
+        command=command,
+        output=output,
+    )
+    assert result.exit_code == 0, output.getvalue()
+    assert (workdir / "mine.progress_mode").read_text() == "off"
+    assert "[run] progress [mine] · repositories 1/2 · fake mine working" in output.getvalue()
+
+
+def test_status_lines_without_progress(session_factory, workdir, monkeypatch) -> None:
+    behave(monkeypatch, discover={"repositories": 2}, mine={"report_progress": 1.0})
+    output = io.StringIO()
+    run_pipeline(
+        session_factory,
+        options(status_interval=0.2, export=False),
+        command=command,
+        output=output,
+        progress_lines=False,
+    )
+    assert "[run] status:" in output.getvalue()
+    assert "[run] progress" not in output.getvalue()

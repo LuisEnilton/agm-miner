@@ -16,6 +16,10 @@ database:
 Children run in their own process group; the supervisor forwards each Ctrl+C/SIGTERM it
 receives to them exactly once, so one signal lets them stop gracefully and a second one aborts
 (same semantics as ``agm mine``). A child that fails stops the scheduling of new work.
+
+Children do not draw progress themselves (``AGM_PROGRESS=off``): their runs save it in the
+database, and the supervisor's status lines (or the live panel of ``agm run``) read it from there
+(``child_runs``).
 """
 
 from __future__ import annotations
@@ -36,7 +40,9 @@ from typing import IO, TextIO
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from agm_miner.database.models import Repository, RepositoryStatus
+from agm_miner.database.models import PipelineRun, Repository, RepositoryStatus
+from agm_miner.progress_view import summary_line
+from agm_miner.runs import running_runs
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,8 @@ class _Child:
     def __init__(self, stage: str, command: list[str], output: TextIO, lock: threading.Lock):
         self.stage = stage
         self.signals_delivered = 0
-        environment = dict(os.environ, PYTHONUNBUFFERED="1")
+        # The supervisor shows the children's progress (read from the database) itself.
+        environment = dict(os.environ, PYTHONUNBUFFERED="1", AGM_PROGRESS="off")
         self.process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -118,6 +125,19 @@ class _Child:
             self.signals_delivered += 1
 
 
+def child_runs(
+    session_factory: sessionmaker[Session], pids: dict[str, int]
+) -> dict[str, PipelineRun]:
+    """The RUNNING run of each child process (matched by the pid saved in its progress)."""
+    stage_of_pid = {pid: stage for stage, pid in pids.items()}
+    runs = {}
+    for run in running_runs(session_factory):
+        stage = stage_of_pid.get((run.progress or {}).get("pid"))
+        if stage is not None:
+            runs[stage] = run
+    return runs
+
+
 def status_counts(session_factory: sessionmaker[Session]) -> dict[str, int]:
     with session_factory() as session:
         rows = session.execute(
@@ -138,6 +158,7 @@ class PipelineSupervisor:
         output: TextIO | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        progress_lines: bool = True,
     ) -> None:
         self._session_factory = session_factory
         self._options = options
@@ -149,6 +170,13 @@ class PipelineSupervisor:
         self._children: dict[str, _Child] = {}
         self._signals = 0
         self._result = PipelineResult(exit_code=0)
+        # Log the children's progress with each status line (off when a live panel shows it).
+        self._progress_lines = progress_lines
+        self._next_status = 0.0
+
+    def running_children(self) -> dict[str, int]:
+        """Stage → pid of the children running now (safe to call from another thread)."""
+        return {stage: child.process.pid for stage, child in dict(self._children).items()}
 
     # ------------------------------------------------------------------ entry point
 
@@ -173,7 +201,6 @@ class PipelineSupervisor:
             queries = [argument for query in options.queries for argument in ("--query", query)]
             self._start("discover", [*queries, *options.study_args()])
         next_start = {"select": 0.0, "mine": 0.0}
-        next_status = 0.0
 
         while True:
             for stage, code in self._reap():
@@ -209,9 +236,7 @@ class PipelineSupervisor:
             if discovery_done and drained and not self._children:
                 self._log(f"collection finished: {self._describe(counts)}")
                 return
-            if now >= next_status:
-                self._log(self._describe(counts))
-                next_status = now + options.status_interval
+            self._report(counts)
             self._sleep(options.poll_interval)
 
     def _final_phase(self) -> None:
@@ -223,6 +248,7 @@ class PipelineSupervisor:
             self._start(stage, self._options.study_args())
             while stage in self._children:
                 self._reap()
+                self._report()
                 self._sleep(self._options.poll_interval)
             if self._stopping():
                 return
@@ -282,6 +308,20 @@ class PipelineSupervisor:
                 signal.signal(sig, old)
 
     # ------------------------------------------------------------------ output
+
+    def _report(self, counts: dict[str, int] | None = None) -> None:
+        """Every ``status_interval``: repository counts and the progress of each child."""
+        now = self._clock()
+        if now < self._next_status:
+            return
+        self._next_status = now + self._options.status_interval
+        self._log(self._describe(counts or status_counts(self._session_factory)))
+        if not self._progress_lines:
+            return
+        runs = child_runs(self._session_factory, self.running_children())
+        for stage in sorted(runs):
+            if runs[stage].progress:
+                self._log(f"progress {summary_line(runs[stage].progress)}")
 
     def _describe(self, counts: dict[str, int]) -> str:
         running = ", ".join(sorted(self._children)) or "none"

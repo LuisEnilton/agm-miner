@@ -289,7 +289,13 @@ def run(
     study_path: StudyOption = None,
 ) -> None:
     """Run discover, select and mine in parallel until done, then export and analyze."""
-    from agm_miner.orchestrator import PipelineOptions, run_pipeline
+    from agm_miner.orchestrator import (
+        PipelineOptions,
+        PipelineSupervisor,
+        child_runs,
+        status_counts,
+    )
+    from agm_miner.progress_view import ConsoleWriter, PipelinePanel, live_panel
 
     settings, _ = _context(study_path)
     options = PipelineOptions(
@@ -303,7 +309,22 @@ def run(
         study_path=study_path,
         queries=tuple(query or ()),
     )
-    result = run_pipeline(_database(settings), options)
+    factory = _database(settings)
+    console = _output["console"]
+    if console is None:  # no live panel: status lines carry the children's progress
+        result = PipelineSupervisor(factory, options).run()
+    else:
+        supervisor = PipelineSupervisor(
+            factory, options, output=ConsoleWriter(console), progress_lines=False
+        )
+
+        panel = PipelinePanel(
+            supervisor.running_children,
+            lambda children: child_runs(factory, children),
+            lambda: status_counts(factory),
+        )
+        with live_panel(panel, console):
+            result = supervisor.run()
     _print(
         {
             "exit_code": result.exit_code,

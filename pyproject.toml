@@ -21,6 +21,7 @@ dependencies = [
 	"scipy (>=1.11)",
 	"rich (>=13.8)",
 	"anthropic (>=2.1.0,<3.0.0)",
+	"google-genai (>=2.33.0,<3.0.0)",
 ]
 
 [project.scripts]

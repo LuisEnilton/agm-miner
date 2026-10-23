@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     # LLM credentials for the RQ1 content coding (agm rq1 ...); never printed.
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     openrouter_api_key: SecretStr | None = Field(default=None, alias="OPENROUTER_API_KEY")
+    gemini_api_key: SecretStr | None = Field(default=None, alias="GEMINI_API_KEY")
     database_url: str = Field(alias="DATABASE_URL")
 
     data_dir: Path = Field(default=Path("data"), alias="DATA_DIR")
@@ -256,9 +257,12 @@ class Rq1Config(_StrictModel):
     length_bins: list[int] = Field(default_factory=lambda: [50, 150])
     seed: int = 20261022
     # Where the models run: "anthropic" (Claude through the official SDK, Batches API; the final
-    # collection) or "openrouter" (any OpenRouter model, e.g. free ones to test the pipeline).
-    provider: Literal["anthropic", "openrouter"] = "anthropic"
-    # OpenRouter free models allow 20 requests per minute.
+    # collection), "gemini" (Gemini API, e.g. the free tier to test the pipeline) or
+    # "openrouter" (any OpenRouter model, e.g. free ones).
+    provider: Literal["anthropic", "gemini", "openrouter"] = "anthropic"
+    # Pace of the one-request-at-a-time providers (their free tiers limit requests per minute;
+    # the Gemini limits of a project are shown in AI Studio).
+    gemini_requests_per_minute: int = Field(default=10, gt=0)
     openrouter_requests_per_minute: int = Field(default=20, gt=0)
     # Models and effort per phase, as the provider names them. Effort applies to Claude only.
     # (The Claude API no longer accepts sampling parameters, so stability is measured, not

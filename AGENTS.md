@@ -61,7 +61,7 @@ src/agm_miner/
   analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets
   rq1/                # RQ1 com LLM: units (section_key), sampling, codebook, llm (SDK anthropic,
                       # Batches), store (cache + estado dos lotes), execution (lotes retomáveis),
-                      # backends (PromptRequest neutro; AnthropicBackend e OpenRouterBackend)
+                      # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)
   database/           # models.py (schema), session.py (engine único por URL) e schema.py
                       # (todo comando do CLI recusa um banco fora da revisão head do Alembic)
 ```
@@ -154,8 +154,11 @@ falha se a migração divergir dos modelos.
   - `anthropic` (coleta final): o Claude **só** pelo SDK oficial, via `rq1.llm.LLMClient`; trabalho
     em massa pela Batches API (`execution.execute_batched`), que responde do cache, termina lotes
     de uma execução interrompida (`BatchState`) e só envia o que falta;
-  - `openrouter` (testes com modelos gratuitos): HTTP com `requests`, ritmo de 20/min, cada
-    resposta no cache assim que chega; o limite diário levanta `DailyLimitError` sem perder nada.
+  - `gemini` (testes com o nível gratuito, configuração atual) e `openrouter` (alternativa): um
+    pedido por vez (`execute_one_by_one`), no ritmo de `rq1.*_requests_per_minute`, cada resposta
+    no cache assim que chega; o limite diário levanta `DailyLimitError` sem perder nada. O Gemini
+    usa o SDK oficial `google-genai` (cota diária: `quotaId` com `PerDay`; por minuto: espera o
+    `retryDelay`), o OpenRouter usa HTTP com `requests`.
   - Os dois expõem as esperas por `observe_waits`. Testes usam `FakeSession`/SDK falso.
 - Todo comando que chama o LLM ou grava no diretório da RQ1 roda dentro de `store.run_lock(dir)`:
   um segundo comando no mesmo diretório falha com `Rq1BusyError` em vez de enviar os mesmos

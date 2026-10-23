@@ -464,17 +464,22 @@ novo pelo que já foi respondido.
 
 O provedor dos modelos é escolhido em `rq1.provider` no `study.yaml`:
 
-| | `openrouter` (fase de testes, configuração atual) | `anthropic` (coleta final) |
-|---|---|---|
-| Modelos | qualquer modelo do OpenRouter; hoje `nvidia/nemotron-3-super-120b-a12b:free` | Claude Opus 5.5 (labels) e Claude Sonnet 5.5 (classificação) |
-| Credencial | `OPENROUTER_API_KEY` no `.env` | `ANTHROPIC_API_KEY` no `.env` ou `ant auth login` |
-| Muitos pedidos | um a um, 20 por minuto | Batches API (metade do preço, assíncrona) |
-| Limite | modelos gratuitos: 50 requisições por dia (1.000 depois de comprar 10 créditos) | o da conta |
+| | `gemini` (fase de testes, configuração atual) | `openrouter` (alternativa para testes) | `anthropic` (coleta final) |
+|---|---|---|---|
+| Modelos | `gemini-3.5-flash-lite` (nível gratuito) | modelos gratuitos, ex. `nvidia/nemotron-3.5-super-vl:free` | Claude Opus 5.5 (labels) e Claude Sonnet 5.5 (classificação) |
+| Credencial | `GEMINI_API_KEY` ([AI Studio](https://aistudio.google.com/apikey)) | `OPENROUTER_API_KEY` | `ANTHROPIC_API_KEY` ou `ant auth login` |
+| Muitos pedidos | um a um, `rq1.gemini_requests_per_minute` por minuto | um a um, 20 por minuto | Batches API (metade do preço, assíncrona) |
+| Limite | por projeto, visto em https://aistudio.google.com/rate-limit; o diário renova à meia-noite do Pacífico | 50 requisições por dia (1.000 depois de comprar 10 créditos) | o da conta |
 
 Ao atingir o limite diário, o comando para com uma mensagem e mantém tudo o que já foi
-respondido; basta rodar o mesmo comando depois que o limite renovar. Os modelos gratuitos podem
-registrar os prompts: se o OpenRouter responder que não há endpoint compatível com a sua política
-de dados, libere os modelos gratuitos em https://openrouter.ai/settings/privacy.
+respondido; basta rodar o mesmo comando depois que o limite renovar.
+
+**Uso dos dados nos níveis gratuitos:** o Google usa prompts e respostas do nível gratuito para
+melhorar seus produtos, e revisores humanos podem lê-los (desvinculados da conta). Os modelos
+gratuitos do OpenRouter também podem registrar os prompts; se ele responder que não há endpoint
+compatível com a sua política de dados, libere os modelos gratuitos em
+https://openrouter.ai/settings/privacy. O conteúdo enviado vem de repositórios públicos, mas não
+use esses provedores com dados privados.
 
 **Para passar à coleta final**, troque `provider` para `anthropic` e use os modelos indicados nos
 comentários do `study.yaml`. O codebook deve ser refeito com o Claude, porque os labels do artigo
@@ -482,7 +487,7 @@ precisam vir dos modelos finais. As respostas ficam separadas por provedor e mod
 pastas de saída, então os testes nunca se misturam com a coleta.
 
 ```bash
-poetry run agm rq1 models            # modelos gratuitos do OpenRouter com saída estruturada
+poetry run agm rq1 models            # modelos do provedor configurado (--provider gemini|openrouter)
 poetry run agm rq1 smoke             # 1 requisição de teste: confere chave, modelo e schema
 poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
 poetry run agm rq1 propose           # rótulos livres para cada seção da amostra

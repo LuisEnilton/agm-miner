@@ -552,11 +552,30 @@ def rq1_consolidate(
 
 @rq1_app.command("models")
 @_handle_errors
-def rq1_models() -> None:
-    """Free OpenRouter models that accept structured outputs (the list changes often)."""
-    from agm_miner.rq1.backends import list_free_structured_models
+def rq1_models(
+    provider: Annotated[
+        str | None,
+        typer.Option(help="gemini or openrouter (default: rq1.provider in study.yaml)."),
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Models available for testing: Gemini models of your key (which are free: AI Studio) or
+    free OpenRouter models that accept structured outputs. Both lists change often."""
+    from agm_miner.rq1.backends import list_free_structured_models, list_gemini_models
+    from agm_miner.rq1.llm import LLMAuthError
 
-    _print(list_free_structured_models())
+    settings, study = _context(study_path)
+    chosen = provider or study.rq1.provider
+    if chosen == "openrouter":
+        _print(list_free_structured_models())
+    elif chosen == "gemini":
+        from google import genai
+
+        if settings.gemini_api_key is None:
+            raise LLMAuthError("GEMINI_API_KEY is not set in .env")
+        _print(list_gemini_models(genai.Client(api_key=settings.gemini_api_key.get_secret_value())))
+    else:
+        raise typer.BadParameter("--provider must be gemini or openrouter")
 
 
 SMOKE_SCHEMA = {

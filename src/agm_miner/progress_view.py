@@ -212,9 +212,16 @@ def resolve_mode(mode: str, stream: TextIO | None = None) -> str:
     return "live" if stream.isatty() else "plain"
 
 
+# Libraries that log every HTTP request at INFO (one line per LLM call would bury the stage's
+# own messages and scroll the live panel); their warnings and errors still show.
+QUIET_LIBRARIES = ("httpx", "httpx2", "google_genai", "anthropic")
+
+
 def configure_logging(level: str, mode: str) -> Console | None:
     """Set up logging for ``mode``; in ``live`` mode, log lines scroll above the panel and the
     returned console is the one the panel must use."""
+    for library in QUIET_LIBRARIES:
+        logging.getLogger(library).setLevel(max(logging.WARNING, logging.getLevelName(level)))
     if mode == "live":
         console = Console(stderr=True)
         handler = RichHandler(console=console, show_path=False, markup=False)

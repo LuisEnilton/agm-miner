@@ -47,19 +47,22 @@ rq1:
   per_repo_cap: 5
   length_bins: [50, 150]
   seed: 20261022
-  # TESTING PHASE: the pipeline runs on a free OpenRouter model (`agm rq1 models` lists the free
-  # ones with structured outputs). Free models allow 20 requests/minute and 50/day (1000/day after
-  # buying 10 credits); answers are cached, so a run stopped by the daily limit continues later.
+  # TESTING PHASE: the pipeline runs on the free tier of the Gemini API (gemini-3.5-flash-lite).
+  # Its limits per minute and per day are shown in https://aistudio.google.com/rate-limit and the
+  # daily ones reset at midnight Pacific time; answers are cached, so a run stopped by the daily
+  # limit continues later. Alternative (also free): provider openrouter with a model from
+  # `agm rq1 models --provider openrouter`, e.g. nvidia/nemotron-3.5-super-vl:free.
   #
   # FINAL COLLECTION: set provider to anthropic and use the commented models (labels by Claude
   # Opus 5.5, classification by Claude Sonnet 5.5), then redo the codebook with them. Cache keys
   # and output folders include the provider and model, so test answers never mix with final ones.
-  provider: openrouter
-  propose_model: nvidia/nemotron-3-super-120b-a12b:free       # claude-opus-5-5
+  provider: gemini
+  gemini_requests_per_minute: 10
+  propose_model: gemini-3.5-flash-lite            # claude-opus-5-5
   propose_effort: high
-  consolidate_model: nvidia/nemotron-3-super-120b-a12b:free   # claude-opus-5-5
+  consolidate_model: gemini-3.5-flash-lite        # claude-opus-5-5
   consolidate_effort: high
-  classify_model: nvidia/nemotron-3-super-120b-a12b:free      # claude-sonnet-5-5
+  classify_model: gemini-3.5-flash-lite           # claude-sonnet-5-5
   classify_effort: low
   chunk_sections: 30
   validation_size: 300

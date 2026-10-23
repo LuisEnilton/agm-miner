@@ -88,6 +88,47 @@ class ResponseCache:
         if result.ok:
             _write_json(self._path(result.custom_id), result.as_dict())
 
+    def delete(self, key: str) -> None:
+        """Forget an answer (e.g. one that did not follow the requested format)."""
+        self._path(key).unlink(missing_ok=True)
+
+
+class FailureLog:
+    """How many times each request failed (API error, refusal, truncation or an answer that
+    did not follow the format). Requests that failed ``max_attempts`` times are given up: they
+    are no longer sent, so one hopeless request cannot drain a daily quota run after run."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def _load(self) -> dict[str, dict[str, Any]]:
+        if not self.path.exists():
+            return {}
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def attempts(self, key: str) -> int:
+        return int(self._load().get(key, {}).get("attempts", 0))
+
+    def given_up(self, keys: list[str], max_attempts: int) -> list[str]:
+        failures = self._load()
+        return [key for key in keys if failures.get(key, {}).get("attempts", 0) >= max_attempts]
+
+    def record(self, key: str, error: str) -> None:
+        failures = self._load()
+        entry = failures.setdefault(key, {"attempts": 0})
+        entry["attempts"] += 1
+        entry["last_error"] = error[:500]
+        _write_json(self.path, failures)
+
+    def clear(self, key: str) -> None:
+        failures = self._load()
+        if failures.pop(key, None) is not None:
+            _write_json(self.path, failures)
+
+    def errors(self, keys: list[str]) -> dict[str, str]:
+        failures = self._load()
+        return {key: failures[key].get("last_error", "") for key in keys if key in failures}
+
 
 class BatchState:
     """Batches submitted and not yet collected. Every change is a locked read-modify-write, so

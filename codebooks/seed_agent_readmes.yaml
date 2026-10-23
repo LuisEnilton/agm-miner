@@ -4,6 +4,7 @@
 # consolidate), so the resulting codebook can be mapped onto related work.
 name: agent_readmes
 version: "2025"
+description: "Agent READMEs"
 source: "Chatlatanagulchai et al. 2025, arXiv:2511.12884, Table 3"
 categories:
   - id: system_overview

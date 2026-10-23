@@ -86,6 +86,8 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
         from agm_miner.rq1.llm import LLMAuthError, LLMRequestError
+        from agm_miner.rq1.prompts import InvalidAnswer
+        from agm_miner.rq1.stages import IncompleteProposalsError, SampleMismatchError
         from agm_miner.rq1.store import Rq1BusyError
         from agm_miner.runs import StageBusyError, interrupt_signals
         from agm_miner.stages.mining import RepositoryLookupError
@@ -110,6 +112,9 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             LLMAuthError,
             LLMRequestError,
             Rq1BusyError,
+            InvalidAnswer,
+            SampleMismatchError,
+            IncompleteProposalsError,
             SelectionError,
             RepositoryLookupError,
             FileNotFoundError,
@@ -483,6 +488,9 @@ def _rq1_dirs(settings: Settings, gold: Path | None) -> tuple[Path, Path]:
 def rq1_sample(
     gold: GoldOption = None,
     size: Annotated[int | None, typer.Option(min=1, help="Override rq1.sample_size.")] = None,
+    force: Annotated[
+        bool, typer.Option(help="Replace a sample that already has proposals.")
+    ] = False,
     study_path: StudyOption = None,
 ) -> None:
     """Stratified sample of sections for label creation (rq1.* in study.yaml)."""
@@ -491,16 +499,83 @@ def rq1_sample(
     settings, study = _context(study_path)
     config = study.rq1 if size is None else study.rq1.model_copy(update={"sample_size": size})
     gold_dir, output_dir = _rq1_dirs(settings, gold)
-    _print(sample_sections(gold_dir, output_dir, config))
+    _print(sample_sections(gold_dir, output_dir, config, force=force))
+
+
+@rq1_app.command("propose")
+@_handle_errors
+def rq1_propose(gold: GoldOption = None, study_path: StudyOption = None) -> None:
+    """Free labels for every sampled section (rq1.propose_model). Answers are cached: running
+    it again after an interruption or a daily limit continues where it stopped."""
+    from agm_miner.progress import Progress, publishing
+    from agm_miner.rq1.backends import make_backend
+    from agm_miner.rq1.stages import propose_labels
+
+    settings, study = _context(study_path)
+    gold_dir, output_dir = _rq1_dirs(settings, gold)
+    backend = make_backend(settings, study.rq1, "propose")
+    with publishing(Progress("RQ1 PROPOSE")) as progress, _showing_progress():
+        result = propose_labels(gold_dir, output_dir, study.rq1, backend, progress)
+    _print(result)
+
+
+@rq1_app.command("consolidate")
+@_handle_errors
+def rq1_consolidate(
+    gold: GoldOption = None,
+    partial: Annotated[
+        bool, typer.Option(help="Consolidate even if part of the sample has no proposals.")
+    ] = False,
+    study_path: StudyOption = None,
+) -> None:
+    """Draft codebook from the proposed labels (rq1.consolidate_model), to be curated by hand
+    into codebooks/rq1.yaml."""
+    from agm_miner.progress import Progress, publishing
+    from agm_miner.rq1.backends import make_backend
+    from agm_miner.rq1.stages import consolidate_labels
+
+    settings, study = _context(study_path)
+    gold_dir, output_dir = _rq1_dirs(settings, gold)
+    backend = make_backend(settings, study.rq1, "consolidate")
+    with publishing(Progress("RQ1 CONSOLIDATE")) as progress, _showing_progress():
+        result = consolidate_labels(
+            gold_dir,
+            output_dir,
+            study.rq1,
+            backend,
+            seed_codebook=study.rq1.seed_codebook,
+            allow_partial=partial,
+            progress=progress,
+        )
+    _print(result)
 
 
 @rq1_app.command("models")
 @_handle_errors
-def rq1_models() -> None:
-    """Free OpenRouter models that accept structured outputs (the list changes often)."""
-    from agm_miner.rq1.backends import list_free_structured_models
+def rq1_models(
+    provider: Annotated[
+        str | None,
+        typer.Option(help="gemini or openrouter (default: rq1.provider in study.yaml)."),
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Models available for testing: Gemini models of your key (which are free: AI Studio) or
+    free OpenRouter models that accept structured outputs. Both lists change often."""
+    from agm_miner.rq1.backends import list_free_structured_models, list_gemini_models
+    from agm_miner.rq1.llm import LLMAuthError
 
-    _print(list_free_structured_models())
+    settings, study = _context(study_path)
+    chosen = provider or study.rq1.provider
+    if chosen == "openrouter":
+        _print(list_free_structured_models())
+    elif chosen == "gemini":
+        from google import genai
+
+        if settings.gemini_api_key is None:
+            raise LLMAuthError("GEMINI_API_KEY is not set in .env")
+        _print(list_gemini_models(genai.Client(api_key=settings.gemini_api_key.get_secret_value())))
+    else:
+        raise typer.BadParameter("--provider must be gemini or openrouter")
 
 
 SMOKE_SCHEMA = {

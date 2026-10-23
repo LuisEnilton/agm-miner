@@ -464,17 +464,22 @@ novo pelo que já foi respondido.
 
 O provedor dos modelos é escolhido em `rq1.provider` no `study.yaml`:
 
-| | `openrouter` (fase de testes, configuração atual) | `anthropic` (coleta final) |
-|---|---|---|
-| Modelos | qualquer modelo do OpenRouter; hoje `nvidia/nemotron-3-super-120b-a12b:free` | Claude Opus 5.5 (labels) e Claude Sonnet 5.5 (classificação) |
-| Credencial | `OPENROUTER_API_KEY` no `.env` | `ANTHROPIC_API_KEY` no `.env` ou `ant auth login` |
-| Muitos pedidos | um a um, 20 por minuto | Batches API (metade do preço, assíncrona) |
-| Limite | modelos gratuitos: 50 requisições por dia (1.000 depois de comprar 10 créditos) | o da conta |
+| | `gemini` (fase de testes, configuração atual) | `openrouter` (alternativa para testes) | `anthropic` (coleta final) |
+|---|---|---|---|
+| Modelos | `gemini-3.5-flash-lite` (nível gratuito) | modelos gratuitos, ex. `nvidia/nemotron-3.5-super-vl:free` | Claude Opus 5.5 (labels) e Claude Sonnet 5.5 (classificação) |
+| Credencial | `GEMINI_API_KEY` ([AI Studio](https://aistudio.google.com/apikey)) | `OPENROUTER_API_KEY` | `ANTHROPIC_API_KEY` ou `ant auth login` |
+| Muitos pedidos | um a um, `rq1.gemini_requests_per_minute` por minuto | um a um, 20 por minuto | Batches API (metade do preço, assíncrona) |
+| Limite | por projeto, visto em https://aistudio.google.com/rate-limit; o diário renova à meia-noite do Pacífico | 50 requisições por dia (1.000 depois de comprar 10 créditos) | o da conta |
 
 Ao atingir o limite diário, o comando para com uma mensagem e mantém tudo o que já foi
-respondido; basta rodar o mesmo comando depois que o limite renovar. Os modelos gratuitos podem
-registrar os prompts: se o OpenRouter responder que não há endpoint compatível com a sua política
-de dados, libere os modelos gratuitos em https://openrouter.ai/settings/privacy.
+respondido; basta rodar o mesmo comando depois que o limite renovar.
+
+**Uso dos dados nos níveis gratuitos:** o Google usa prompts e respostas do nível gratuito para
+melhorar seus produtos, e revisores humanos podem lê-los (desvinculados da conta). Os modelos
+gratuitos do OpenRouter também podem registrar os prompts; se ele responder que não há endpoint
+compatível com a sua política de dados, libere os modelos gratuitos em
+https://openrouter.ai/settings/privacy. O conteúdo enviado vem de repositórios públicos, mas não
+use esses provedores com dados privados.
 
 **Para passar à coleta final**, troque `provider` para `anthropic` e use os modelos indicados nos
 comentários do `study.yaml`. O codebook deve ser refeito com o Claude, porque os labels do artigo
@@ -482,13 +487,46 @@ precisam vir dos modelos finais. As respostas ficam separadas por provedor e mod
 pastas de saída, então os testes nunca se misturam com a coleta.
 
 ```bash
-poetry run agm rq1 models            # modelos gratuitos do OpenRouter com saída estruturada
+poetry run agm rq1 models            # modelos do provedor configurado (--provider gemini|openrouter)
 poetry run agm rq1 smoke             # 1 requisição de teste: confere chave, modelo e schema
 poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
+poetry run agm rq1 propose           # rótulos livres para cada seção da amostra
+poetry run agm rq1 consolidate       # rascunho do codebook a partir dos rótulos propostos
 ```
 
-Os demais comandos (`propose`, `consolidate`, `saturation`, `classify`, `validate`) vêm nos
-próximos PRs.
+### Criação dos labels
+
+1. **`agm rq1 sample`** sorteia a amostra (estratificada por ferramenta, tipo e tamanho, com no
+   máximo `rq1.per_repo_cap` seções por repositório). Trocar uma amostra que já tem propostas exige
+   `--force`, porque as propostas deixariam de corresponder a ela.
+2. **`agm rq1 propose`** envia as seções em grupos de `rq1.propose_chunk_sections` (10). Para cada
+   seção o modelo propõe de 1 a 3 rótulos com definição e diz se ela instrui o agente ou só descreve
+   o projeto. Saída: `propose/<provedor>/<modelo>/proposals.parquet` e `proposals.json`.
+3. **`agm rq1 consolidate`** transforma os rótulos (normalizados, com contagens e definições) num
+   rascunho de codebook, em três etapas:
+   - **induzir:** o modelo agrupa os rótulos em `rq1.target_categories` categorias, com definição e
+     critérios de inclusão e exclusão, **sem ver** a taxonomia de referência. No piloto, quando a
+     referência aparecia junto com os rótulos, o modelo simplesmente a copiava;
+   - **alinhar:** numa requisição separada, cada categoria induzida é associada à categoria
+     correspondente do *Agent READMEs* (`rq1.seed_codebook`) ou marcada como nova;
+   - **mapear:** cada rótulo proposto é atribuído a uma categoria (ou a `other`), em lotes de
+     `rq1.map_chunk_labels`.
+
+   Saídas em `consolidate/<provedor>/<modelo>/`: `codebook.draft.yaml` (categorias, com a
+   correspondência na literatura) e `label_map.parquet` (rótulo → categoria). O comando recusa
+   propostas de outra amostra e propostas que cobrem menos de `rq1.min_proposal_coverage` da
+   amostra (use `--partial` para aceitar).
+4. **Curadoria (manual):** revise o rascunho (categorias redundantes, definições vagas, rótulos que
+   caíram em `other`) e salve a versão final em `codebooks/rq1.yaml`, com um `version` próprio. É
+   esse arquivo, versionado no repositório, que a classificação usa.
+
+Respostas que não seguem o formato pedido (seção faltando, sem rótulo, JSON inválido) não ficam no
+cache e são pedidas de novo na próxima execução. Depois de `rq1.max_attempts` falhas, o pedido é
+abandonado e aparece em `given_up` no manifesto, para não consumir a cota todo dia. Os prompts têm
+versão (`propose-v2`, `induce-v1`, `align-v1`, `map-v1`): mudar o texto de um prompt exige mudar a versão.
+
+A saturação (`agm rq1 saturation`), a classificação (`classify`) e a validação (`validate`) vêm
+nos próximos PRs.
 
 ## Testes
 

@@ -21,6 +21,13 @@ from anthropic.types.messages.batch_create_params import Request
 
 from agm_miner.config import Settings
 
+# Claude models that accept server-side refusal fallbacks on single (non-batch) requests: a
+# declined request is re-run on a fallback model chosen by the API ("default" routing).
+REFUSAL_FALLBACK_MODELS = frozenset(
+    {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
+)
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
 _USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -84,7 +91,14 @@ def result_from_message(custom_id: str, message: Any) -> LLMResult:
     text = next((block.text for block in message.content if block.type == "text"), None)
     status = {"refusal": "refused", "max_tokens": "truncated"}.get(message.stop_reason, "succeeded")
     usage = {name: int(getattr(message.usage, name, 0) or 0) for name in _USAGE_FIELDS}
-    return LLMResult(custom_id, status, text=text, stop_reason=message.stop_reason, usage=usage)
+    return LLMResult(
+        custom_id,
+        status,
+        text=text,
+        stop_reason=message.stop_reason,
+        usage=usage,
+        served_by=getattr(message, "model", None),  # differs from the request after a fallback
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,9 +195,16 @@ class LLMClient:
     # ------------------------------------------------------------------ single requests
 
     def complete(self, request: LLMRequest) -> LLMResult:
-        """One streamed request (no timeout risk for long outputs)."""
+        """One streamed request (no timeout risk for long outputs). Models that support it get
+        the server-side refusal fallback, so a declined request is answered by another model
+        instead of failing (``served_by`` tells which)."""
 
         def stream() -> Any:
+            if request.params.get("model") in REFUSAL_FALLBACK_MODELS:
+                with self.sdk.beta.messages.stream(
+                    **request.params, betas=[_FALLBACK_BETA], fallbacks="default"
+                ) as response:
+                    return response.get_final_message()
             with self.sdk.messages.stream(**request.params) as response:
                 return response.get_final_message()
 

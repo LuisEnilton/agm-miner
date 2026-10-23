@@ -31,7 +31,8 @@ poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silv
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
 poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
-poetry run agm rq1 sample           # RQ1: amostra para a criação de labels com LLM (ANTHROPIC_API_KEY)
+poetry run agm rq1 sample           # RQ1: amostra para a criação de labels com LLM
+poetry run agm rq1 propose | consolidate   # RQ1: rótulos livres → rascunho do codebook
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
 poetry run ruff check . && poetry run ruff format .
@@ -160,6 +161,9 @@ falha se a migração divergir dos modelos.
   um segundo comando no mesmo diretório falha com `Rq1BusyError` em vez de enviar os mesmos
   pedidos de novo. A amostra depende só do conteúdo, da semente e da configuração, nunca de ids do
   banco (`sampling` ordena por `section_key` antes de embaralhar).
+- Prompts e validação das respostas ficam em `rq1/prompts.py` (puro). Etapas passam por
+  `stages._run_requests`/`_settle`: resposta fora do formato (`InvalidAnswer`) sai do cache e conta
+  no `FailureLog`; com `rq1.max_attempts` falhas o pedido é abandonado (`given_up`).
 - A chave do cache (`store.request_key`) precisa cobrir tudo o que determina a resposta (fase,
   provedor, modelo, versão do prompt, hash do codebook, `section_key`). Ao mudar um prompt, mude a
   versão.

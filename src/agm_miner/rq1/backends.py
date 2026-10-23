@@ -226,7 +226,14 @@ class OpenRouterBackend:
                     f"OpenRouter found no endpoint for {self.model} under your data policy. "
                     f"Allow the model's endpoints in {OPENROUTER_PRIVACY_SETTINGS} ({message})"
                 )
-            if response.status_code not in _RETRYABLE:
+            if response.status_code == 404:
+                raise LLMRequestError(
+                    f"OpenRouter could not serve {self.model} ({message}). Free endpoints come and "
+                    "go: pick another model from `agm rq1 models` for rq1.*_model in study.yaml."
+                )
+            # 402 with Retry-After: the in-flight spending budget is momentarily full.
+            temporary_402 = response.status_code == 402 and _retry_after(response) is not None
+            if response.status_code not in _RETRYABLE and not temporary_402:
                 raise LLMRequestError(
                     f"OpenRouter request failed with status {response.status_code}: {message}"
                 )

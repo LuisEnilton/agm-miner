@@ -485,10 +485,35 @@ pastas de saída, então os testes nunca se misturam com a coleta.
 poetry run agm rq1 models            # modelos gratuitos do OpenRouter com saída estruturada
 poetry run agm rq1 smoke             # 1 requisição de teste: confere chave, modelo e schema
 poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
+poetry run agm rq1 propose           # rótulos livres para cada seção da amostra
+poetry run agm rq1 consolidate       # rascunho do codebook a partir dos rótulos propostos
 ```
 
-Os demais comandos (`propose`, `consolidate`, `saturation`, `classify`, `validate`) vêm nos
-próximos PRs.
+### Criação dos labels
+
+1. **`agm rq1 sample`** sorteia a amostra (estratificada por ferramenta, tipo e tamanho, com no
+   máximo `rq1.per_repo_cap` seções por repositório). Trocar uma amostra que já tem propostas exige
+   `--force`, porque as propostas deixariam de corresponder a ela.
+2. **`agm rq1 propose`** envia as seções em grupos de `rq1.propose_chunk_sections` (10). Para cada
+   seção o modelo propõe de 1 a 3 rótulos com definição e diz se ela instrui o agente ou só descreve
+   o projeto. Saída: `propose/<provedor>/<modelo>/proposals.parquet` e `proposals.json`.
+3. **`agm rq1 consolidate`** junta os rótulos (normalizados, com contagens e definições) e a
+   taxonomia de referência (`rq1.seed_codebook`) num rascunho: `consolidate/<provedor>/<modelo>/
+   codebook.draft.yaml`, com categorias, definições, critérios de inclusão e exclusão e
+   correspondência com o *Agent READMEs*, e `label_map.parquet`, que liga cada rótulo proposto a
+   uma categoria (ou a `other`). Ele recusa propostas de outra amostra e propostas que cobrem menos
+   de `rq1.min_proposal_coverage` da amostra (use `--partial` para aceitar).
+4. **Curadoria (manual):** revise o rascunho (categorias redundantes, definições vagas, rótulos que
+   caíram em `other`) e salve a versão final em `codebooks/rq1.yaml`, com um `version` próprio. É
+   esse arquivo, versionado no repositório, que a classificação usa.
+
+Respostas que não seguem o formato pedido (seção faltando, sem rótulo, JSON inválido) não ficam no
+cache e são pedidas de novo na próxima execução. Depois de `rq1.max_attempts` falhas, o pedido é
+abandonado e aparece em `given_up` no manifesto, para não consumir a cota todo dia. Os prompts têm
+versão (`propose-v1`, `consolidate-v1`): mudar o texto de um prompt exige mudar a versão.
+
+A saturação (`agm rq1 saturation`), a classificação (`classify`) e a validação (`validate`) vêm
+nos próximos PRs.
 
 ## Testes
 

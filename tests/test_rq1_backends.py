@@ -301,7 +301,8 @@ def test_free_structured_models_listing() -> None:
 # --------------------------------------------------------------------------- factory and CLI
 
 
-def test_make_backend_follows_the_configured_provider() -> None:
+def test_make_backend_follows_the_configured_provider(monkeypatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     settings = Settings(DATABASE_URL="postgresql://unused", OPENROUTER_API_KEY="k")
     claude = make_backend(settings, Rq1Config(), "classify")
     assert isinstance(claude, AnthropicBackend) and claude.model == "claude-sonnet-5-5"
@@ -312,7 +313,10 @@ def test_make_backend_follows_the_configured_provider() -> None:
     assert isinstance(free, OpenRouterBackend) and free.model == "nvidia/model:free"
 
     with pytest.raises(LLMAuthError, match="OPENROUTER_API_KEY"):
-        make_backend(Settings(DATABASE_URL="postgresql://unused"), config, "propose")
+        # _env_file=None: the developer's .env may hold a real key.
+        make_backend(
+            Settings(_env_file=None, DATABASE_URL="postgresql://unused"), config, "propose"
+        )
 
 
 def test_smoke_command(monkeypatch) -> None:

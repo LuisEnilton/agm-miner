@@ -269,6 +269,22 @@ class Rq1Config(_StrictModel):
     consolidate_effort: str = "high"
     classify_model: str = "claude-sonnet-5-5"
     classify_effort: str = "low"
+    # Label creation: sections per propose request (several per request keeps a pilot within
+    # the 50 requests/day of free OpenRouter models), the size the draft codebook should have,
+    # and how much of the sample must have proposals before consolidating.
+    # Taxonomy of related work shown as a reference when consolidating the proposed labels.
+    seed_codebook: Path = Path("codebooks/seed_agent_readmes.yaml")
+    propose_chunk_sections: int = Field(default=10, gt=0)
+    propose_max_tokens: int = Field(default=8_000, gt=0)
+    target_categories: list[int] = Field(default_factory=lambda: [12, 25])
+    consolidate_max_tokens: int = Field(default=32_000, gt=0)
+    # Proposed labels per mapping request (label -> category), after the categories are induced.
+    map_chunk_labels: int = Field(default=50, gt=0)
+    map_max_tokens: int = Field(default=8_000, gt=0)
+    min_proposal_coverage: float = Field(default=0.95, gt=0, le=1)
+    # A request that failed this many times (error, refusal, truncation or an answer outside
+    # the requested format) is given up and listed in the manifest instead of retried forever.
+    max_attempts: int = Field(default=3, gt=0)
     # Sections per classification request (a file's sections are sent together, in chunks).
     chunk_sections: int = Field(default=30, gt=0)
     # Blind validation sample labelled by hand.
@@ -280,6 +296,13 @@ class Rq1Config(_StrictModel):
         if any(limit <= 0 for limit in bins) or bins != sorted(set(bins)):
             raise ValueError("length_bins must be positive and strictly increasing")
         return bins
+
+    @field_validator("target_categories")
+    @classmethod
+    def _category_range(cls, value: list[int]) -> list[int]:
+        if len(value) != 2 or not 0 < value[0] <= value[1]:
+            raise ValueError("target_categories must be [minimum, maximum] with 0 < min <= max")
+        return value
 
     def model_for(self, phase: str) -> tuple[str, str]:
         """(model, effort) of a phase: propose, consolidate or classify."""

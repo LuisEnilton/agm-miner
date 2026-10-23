@@ -55,11 +55,11 @@ rq1:
   # Opus 5.5, classification by Claude Sonnet 5.5), then redo the codebook with them. Cache keys
   # and output folders include the provider and model, so test answers never mix with final ones.
   provider: openrouter
-  propose_model: nvidia/nemotron-3-super-120b-a12b:free       # claude-opus-5-5
+  propose_model: nvidia/nemotron-3.5-super-vl:free            # claude-opus-5-5
   propose_effort: high
-  consolidate_model: nvidia/nemotron-3-super-120b-a12b:free   # claude-opus-5-5
+  consolidate_model: nvidia/nemotron-3.5-super-vl:free        # claude-opus-5-5
   consolidate_effort: high
-  classify_model: nvidia/nemotron-3-super-120b-a12b:free      # claude-sonnet-5-5
+  classify_model: nvidia/nemotron-3.5-super-vl:free           # claude-sonnet-5-5
   classify_effort: low
   chunk_sections: 30
   validation_size: 300

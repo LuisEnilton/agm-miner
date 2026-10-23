@@ -451,7 +451,10 @@ A RQ1 é respondida em duas fases sobre as seções da tabela `rq1_sections` (sa
 2. **Classificação** de todas as seções com o Claude Sonnet 5.5 contra o codebook final, validada
    numa amostra cega rotulada à mão (kappa de Cohen).
 
-Os comandos ficam em `agm rq1 ...` e usam a seção `rq1:` do `study.yaml`. Assim como a análise, eles
+Os comandos ficam em `agm rq1 ...` e usam a seção `rq1:` do `study.yaml`. Só um comando por vez
+trabalha em cada diretório da RQ1: um segundo é recusado, para não enviar os mesmos pedidos (e
+pagar) duas vezes. A amostra depende só do conteúdo, da semente e da configuração, então é a mesma
+em qualquer export dos mesmos dados. Assim como a análise, eles
 não usam o banco: leem a saída do `analyze` e gravam em `DATA_DIR/rq1/<nome da saída>/`, com um
 manifesto ao lado de cada resultado. As respostas do LLM ficam em cache em disco, e os lotes da
 Batches API ficam registrados, então um comando interrompido continua de onde parou sem pagar de

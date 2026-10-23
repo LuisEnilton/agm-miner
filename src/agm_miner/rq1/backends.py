@@ -241,7 +241,12 @@ class OpenRouterBackend:
     # ------------------------------------------------------------------ plumbing
 
     def _result(self, custom_id: str, response: Any) -> LLMResult:
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:  # a 200 whose body is not JSON: this request failed, not the run
+            return LLMResult(
+                custom_id, "errored", error=f"invalid JSON body: {response.text[:200]}"
+            )
         served_by = data.get("provider")
         if data.get("error"):
             return LLMResult(custom_id, "errored", error=str(data["error"]), served_by=served_by)
@@ -303,7 +308,10 @@ def _retry_after(response: Any) -> float | None:
 
 def list_free_structured_models(session: Any | None = None) -> list[dict[str, Any]]:
     """Free OpenRouter models whose endpoints accept structured outputs (public, no key)."""
-    response = (session or requests.Session()).get(f"{OPENROUTER_API}/models", timeout=60)
+    try:
+        response = (session or requests.Session()).get(f"{OPENROUTER_API}/models", timeout=60)
+    except requests.RequestException as exc:
+        raise LLMRequestError(f"Could not reach OpenRouter: {exc}") from exc
     if response.status_code != 200:
         raise LLMRequestError(f"OpenRouter model list failed with status {response.status_code}")
     models = []

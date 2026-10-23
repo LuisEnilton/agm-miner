@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -250,16 +250,16 @@ class Rq1Config(_StrictModel):
 
     # Label-creation sample: stratified by tool x artifact kind x length, at most
     # ``per_repo_cap`` sections per repository so large repositories do not dominate.
-    sample_size: int = 400
-    per_repo_cap: int = 5
-    # Section lengths (words) separating the short / medium / long strata.
+    sample_size: int = Field(default=400, gt=0)
+    per_repo_cap: int = Field(default=5, gt=0)
+    # Section lengths (words) separating the short / medium / long strata (increasing).
     length_bins: list[int] = Field(default_factory=lambda: [50, 150])
     seed: int = 20261022
     # Where the models run: "anthropic" (Claude through the official SDK, Batches API; the final
     # collection) or "openrouter" (any OpenRouter model, e.g. free ones to test the pipeline).
     provider: Literal["anthropic", "openrouter"] = "anthropic"
     # OpenRouter free models allow 20 requests per minute.
-    openrouter_requests_per_minute: int = 20
+    openrouter_requests_per_minute: int = Field(default=20, gt=0)
     # Models and effort per phase, as the provider names them. Effort applies to Claude only.
     # (The Claude API no longer accepts sampling parameters, so stability is measured, not
     # fixed: see agm rq1 validate.)
@@ -270,9 +270,16 @@ class Rq1Config(_StrictModel):
     classify_model: str = "claude-sonnet-5-5"
     classify_effort: str = "low"
     # Sections per classification request (a file's sections are sent together, in chunks).
-    chunk_sections: int = 30
+    chunk_sections: int = Field(default=30, gt=0)
     # Blind validation sample labelled by hand.
-    validation_size: int = 300
+    validation_size: int = Field(default=300, gt=0)
+
+    @field_validator("length_bins")
+    @classmethod
+    def _increasing_bins(cls, bins: list[int]) -> list[int]:
+        if any(limit <= 0 for limit in bins) or bins != sorted(set(bins)):
+            raise ValueError("length_bins must be positive and strictly increasing")
+        return bins
 
     def model_for(self, phase: str) -> tuple[str, str]:
         """(model, effort) of a phase: propose, consolidate or classify."""

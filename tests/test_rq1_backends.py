@@ -26,12 +26,12 @@ from agm_miner.rq1.backends import (
 )
 from agm_miner.rq1.llm import LLMAuthError, LLMClient, LLMRequestError, LLMResult
 from agm_miner.rq1.store import BatchState, ResponseCache
-from tests.test_rq1_foundations import FakeLLM
+from tests.test_rq1_foundations import A, B, C, FakeLLM
 
 SCHEMA = {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}
 
 
-def prompt(custom_id: str = "p1") -> PromptRequest:
+def prompt(custom_id: str = A) -> PromptRequest:
     return PromptRequest(custom_id, "You label sections.", "Section text", SCHEMA, 500, "labels")
 
 
@@ -63,9 +63,9 @@ def test_anthropic_params_cache_the_system_prompt_and_constrain_the_output() -> 
 def test_anthropic_execute_goes_through_batches(tmp_path: Path) -> None:
     backend = AnthropicBackend(FakeLLM(), "claude-sonnet-5-5", "low")
     results = backend.execute(
-        [prompt("a"), prompt("b")], ResponseCache(tmp_path), BatchState(tmp_path / "s.json")
+        [prompt(A), prompt(B)], ResponseCache(tmp_path), BatchState(tmp_path / "s.json")
     )
-    assert sorted(results) == ["a", "b"] and backend.client.batches == {"batch_1": ["a", "b"]}
+    assert sorted(results) == sorted([A, B]) and backend.client.batches == {"batch_1": [A, B]}
 
 
 def test_openrouter_body() -> None:
@@ -157,7 +157,7 @@ def test_openrouter_success_is_normalised() -> None:
     backend, session, _ = openrouter(answer())
     result = backend.complete(prompt())
     assert result == LLMResult(
-        "p1",
+        A,
         "succeeded",
         text='{"x": 1}',
         stop_reason="stop",
@@ -220,8 +220,8 @@ def test_openrouter_gives_up_after_bounded_retries() -> None:
 
 def test_openrouter_paces_requests() -> None:
     backend, _, clock = openrouter(answer(), answer(), requests_per_minute=20)
-    backend.complete(prompt("a"))
-    backend.complete(prompt("b"))
+    backend.complete(prompt(A))
+    backend.complete(prompt(B))
     assert clock.sleeps == [3.0]
 
 
@@ -243,20 +243,41 @@ def test_openrouter_errors_that_stop_the_run() -> None:
 
 def test_daily_limit_stops_and_the_next_run_continues(tmp_path: Path) -> None:
     cache, state = ResponseCache(tmp_path / "cache"), BatchState(tmp_path / "state.json")
-    prompts = [prompt("a"), prompt("b"), prompt("c")]
+    prompts = [prompt(A), prompt(B), prompt(C)]
     backend, session, _ = openrouter(
         answer(),
         error(429, "Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000"),
     )
     with pytest.raises(DailyLimitError, match="run the same command again"):
         backend.execute(prompts, cache, state)
-    assert cache.get("a") is not None and cache.get("b") is None
+    assert cache.get(A) is not None and cache.get(B) is None
 
     # Next day: "a" comes from the cache; only "b" and "c" are asked.
     backend, session, _ = openrouter(answer(), answer())
     results = backend.execute(prompts, cache, state)
     assert all(result.ok for result in results.values())
     assert len(session.posts) == 2
+
+
+def test_a_non_json_answer_fails_only_that_request() -> None:
+    class NotJson(FakeResponse):
+        def json(self) -> Any:
+            raise ValueError("Expecting value")
+
+    backend, _, _ = openrouter(NotJson(200, None))
+    result = backend.complete(prompt())
+    assert result.status == "errored" and "invalid JSON body" in result.error
+
+
+def test_model_listing_without_network_is_a_clear_error() -> None:
+    import requests
+
+    class Offline:
+        def get(self, url: str, timeout: float):
+            raise requests.ConnectionError("no route to host")
+
+    with pytest.raises(LLMRequestError, match="Could not reach OpenRouter"):
+        list_free_structured_models(Offline())
 
 
 def test_free_structured_models_listing() -> None:

@@ -7,11 +7,14 @@ waiting for it, so Ctrl+C at any moment loses no paid work: the next run picks t
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping, Sequence
 
 from agm_miner.progress import Progress
-from agm_miner.rq1.llm import BatchProgress, LLMClient, LLMRequest, LLMResult
+from agm_miner.rq1.llm import BatchProgress, LLMClient, LLMNotFoundError, LLMRequest, LLMResult
 from agm_miner.rq1.store import BatchState, ResponseCache
+
+logger = logging.getLogger(__name__)
 
 # Requests per submitted batch (the API allows 100,000 or 256 MB; smaller batches finish and
 # are cached sooner).
@@ -44,7 +47,13 @@ def execute_batched(
     progress.set_done("cached", len(results))
 
     for batch_id in state.pending():
-        _collect(client, batch_id, wanted, results, cache, state, progress)
+        try:
+            _collect(client, batch_id, wanted, results, cache, state, progress)
+        except LLMNotFoundError:
+            # Results are kept for 29 days; a batch collected that late (or deleted) is gone.
+            # Its requests are simply submitted again below.
+            logger.warning("Batch %s no longer exists; its requests will be sent again", batch_id)
+            state.remove(batch_id)
 
     missing = [request for key, request in wanted.items() if key not in results]
     for start in range(0, len(missing), max_batch_requests):

@@ -4,7 +4,12 @@ Strata are tool x artifact kind x length bucket. Each stratum gets a share of th
 proportional to its size (largest remainder, at least one unit per non-empty stratum when the
 sample is large enough). Within strata, units are taken in a seeded random order, skipping
 repositories that already reached ``per_repo_cap`` units, so a few large repositories cannot
-dominate. Identical sections (same ``section_key``) count once.
+dominate. Identical sections (same ``section_key``) count once, represented by their occurrence
+with the smallest (repository id, path, position).
+
+The result depends only on the content, the seed and the configuration: units are ordered by
+stable fields (never by database ids, which change when a repository is mined again) before the
+seeded shuffle, so the same seed yields the same sample from any export of the same data.
 """
 
 from __future__ import annotations
@@ -80,6 +85,7 @@ def stratified_sample(
     pool = (
         with_strata(units, length_bins)
         .filter(~pl.col("section_key").is_in(list(excluded)))
+        .sort("section_key", "repo_id", "path", "position")
         .unique("section_key", keep="first", maintain_order=True)
     )
     if pool.is_empty() or size <= 0:

@@ -156,6 +156,10 @@ falha se a migração divergir dos modelos.
   - `openrouter` (testes com modelos gratuitos): HTTP com `requests`, ritmo de 20/min, cada
     resposta no cache assim que chega; o limite diário levanta `DailyLimitError` sem perder nada.
   - Os dois expõem as esperas por `observe_waits`. Testes usam `FakeSession`/SDK falso.
+- Todo comando que chama o LLM ou grava no diretório da RQ1 roda dentro de `store.run_lock(dir)`:
+  um segundo comando no mesmo diretório falha com `Rq1BusyError` em vez de enviar os mesmos
+  pedidos de novo. A amostra depende só do conteúdo, da semente e da configuração, nunca de ids do
+  banco (`sampling` ordena por `section_key` antes de embaralhar).
 - A chave do cache (`store.request_key`) precisa cobrir tudo o que determina a resposta (fase,
   provedor, modelo, versão do prompt, hash do codebook, `section_key`). Ao mudar um prompt, mude a
   versão.

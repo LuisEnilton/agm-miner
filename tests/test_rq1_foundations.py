@@ -22,12 +22,14 @@ from agm_miner.rq1.llm import (
     BatchProgress,
     LLMAuthError,
     LLMClient,
+    LLMNotFoundError,
     LLMRequest,
+    LLMRequestError,
     LLMResult,
     result_from_message,
 )
 from agm_miner.rq1.sampling import allocate, length_bucket, stratified_sample
-from agm_miner.rq1.store import BatchState, ResponseCache, request_key
+from agm_miner.rq1.store import BatchState, ResponseCache, Rq1BusyError, request_key, run_lock
 from agm_miner.rq1.units import artifact_chunks, build_units, section_key
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -130,6 +132,40 @@ def test_stratified_sample_is_deterministic_capped_and_excludes() -> None:
 def test_sample_counts_identical_sections_once() -> None:
     units = build_units(sections([{"artifact_id": i, "repo_id": i} for i in range(5)]))
     assert stratified_sample(units, 10, per_repo_cap=5, seed=1, length_bins=[50]).height == 1
+
+
+def test_sample_does_not_depend_on_database_ids() -> None:
+    """Mining a repository again gives its artifacts new ids; the sample must not change."""
+    units = make_units(300, repos=30)
+    options = {"per_repo_cap": 3, "seed": 7, "length_bins": [50, 150]}
+    renumbered = units.with_columns((pl.col("artifact_id") * 7 + 1000).alias("artifact_id"))
+    reordered = renumbered.sample(fraction=1.0, shuffle=True, seed=3)
+    first = stratified_sample(units, 60, **options)
+    again = stratified_sample(reordered, 60, **options)
+    assert first["section_key"].to_list() == again["section_key"].to_list()
+
+
+def test_duplicate_sections_are_represented_by_the_smallest_repository() -> None:
+    units = build_units(
+        sections([{"artifact_id": i, "repo_id": repo} for i, repo in enumerate((9, 4, 7))])
+    )
+    sample = stratified_sample(units, 1, per_repo_cap=5, seed=1, length_bins=[50])
+    assert sample["repo_id"].to_list() == [4]
+
+
+def test_rq1_config_rejects_invalid_values() -> None:
+    from agm_miner.config import Rq1Config
+
+    for invalid in (
+        {"length_bins": [150, 50]},
+        {"length_bins": [0, 50]},
+        {"sample_size": 0},
+        {"per_repo_cap": 0},
+        {"chunk_sections": 0},
+        {"openrouter_requests_per_minute": 0},
+    ):
+        with pytest.raises(ValidationError):
+            Rq1Config(**invalid)
 
 
 # --------------------------------------------------------------------------- codebook
@@ -263,6 +299,8 @@ def test_cache_keeps_only_successful_answers(tmp_path: Path) -> None:
     cache.put(LLMResult(key, "succeeded", text="{}", usage={"input_tokens": 3}))
     cache.put(LLMResult("f" * 64, "refused"))
     assert cache.get(key).text == "{}" and cache.get("f" * 64) is None
+    with pytest.raises(ValueError, match="not a request key"):
+        cache.get("../../etc/passwd")
 
     state = BatchState(tmp_path / "batches.json")
     state.add("batch_1", ["a"])
@@ -297,31 +335,33 @@ class FakeLLM:
                 yield LLMResult(custom_id, "succeeded", text=custom_id, usage={"input_tokens": 2})
 
 
+# Request keys as the stages build them (the cache accepts nothing else).
+A, B, C = (request_key("test", name) for name in "abc")
+
+
 def requests(*ids: str) -> list[LLMRequest]:
     return [LLMRequest(custom_id, {}) for custom_id in ids]
 
 
 def test_execute_batched_caches_chunks_and_retries_failures(tmp_path: Path) -> None:
     cache, state = ResponseCache(tmp_path / "cache"), BatchState(tmp_path / "state.json")
-    llm = FakeLLM(fail={"c"})
+    llm = FakeLLM(fail={C})
     progress = Progress()
-    results = execute_batched(
-        llm, requests("a", "b", "c"), cache, state, progress, max_batch_requests=2
-    )
+    results = execute_batched(llm, requests(A, B, C), cache, state, progress, max_batch_requests=2)
     assert {k: r.status for k, r in results.items()} == {
-        "a": "succeeded",
-        "b": "succeeded",
-        "c": "errored",
+        A: "succeeded",
+        B: "succeeded",
+        C: "errored",
     }
-    assert list(llm.batches.values()) == [["a", "b"], ["c"]]
+    assert list(llm.batches.values()) == [[A, B], [C]]
     assert state.pending() == {}
     assert usage_totals(results.values()) == {"input_tokens": 4}
     assert progress.snapshot()["counters"]["requests"] == {"done": 3, "total": 3}
 
     # A second run only asks what failed.
     retry = FakeLLM()
-    results = execute_batched(retry, requests("a", "b", "c"), cache, state)
-    assert list(retry.batches.values()) == [["c"]]
+    results = execute_batched(retry, requests(A, B, C), cache, state)
+    assert list(retry.batches.values()) == [[C]]
     assert all(result.ok for result in results.values())
 
 
@@ -329,13 +369,86 @@ def test_execute_batched_resumes_an_interrupted_batch(tmp_path: Path) -> None:
     cache, state = ResponseCache(tmp_path / "cache"), BatchState(tmp_path / "state.json")
     llm = FakeLLM()
     # An earlier run submitted a batch and was interrupted before collecting it.
-    llm.batches["batch_9"] = ["a", "b"]
-    state.add("batch_9", ["a", "b"])
-    results = execute_batched(llm, requests("a", "b", "c"), cache, state)
-    assert sorted(results) == ["a", "b", "c"]
-    # Only "c" was submitted again; "a" and "b" came from the pending batch.
-    assert llm.batches == {"batch_9": ["a", "b"], "batch_2": ["c"]}
+    llm.batches["batch_9"] = [A, B]
+    state.add("batch_9", [A, B])
+    results = execute_batched(llm, requests(A, B, C), cache, state)
+    assert sorted(results) == sorted([A, B, C])
+    # Only C was submitted again; A and B came from the pending batch.
+    assert llm.batches == {"batch_9": [A, B], "batch_2": [C]}
     assert state.pending() == {}
+
+
+def test_an_expired_pending_batch_is_dropped_and_resent(tmp_path: Path) -> None:
+    class Expired(FakeLLM):
+        def batch_results(self, batch_id):
+            if batch_id == "batch_old":
+                raise LLMNotFoundError("Claude API: not found")
+            yield from super().batch_results(batch_id)
+
+    cache, state = ResponseCache(tmp_path / "cache"), BatchState(tmp_path / "state.json")
+    state.add("batch_old", [A])
+    llm = Expired()
+    results = execute_batched(llm, requests(A), cache, state)
+    assert results[A].ok and llm.batches == {"batch_1": [A]}
+    assert state.pending() == {}
+
+
+def test_a_failure_while_reading_results_keeps_the_batch_pending(tmp_path: Path) -> None:
+    import httpx2
+
+    class Broken:
+        def results(self, batch_id):
+            yield SimpleNamespace(
+                custom_id=A, result=SimpleNamespace(type="succeeded", message=message("ok"))
+            )
+            raise httpx2.ReadError("connection reset")
+
+    client = LLMClient(
+        Settings(DATABASE_URL="postgresql://unused"),
+        client=SimpleNamespace(messages=SimpleNamespace(batches=Broken())),
+    )
+    with pytest.raises(LLMRequestError, match="Reading the results of batch b1"):
+        list(client.batch_results("b1"))
+
+    class Interrupted(FakeLLM):
+        def batch_results(self, batch_id):
+            raise LLMRequestError("Reading the results of batch failed")
+
+    cache, state = ResponseCache(tmp_path / "cache"), BatchState(tmp_path / "state.json")
+    with pytest.raises(LLMRequestError):
+        execute_batched(Interrupted(), requests(A), cache, state)
+    assert list(state.pending()) == ["batch_1"]  # collected on the next run
+
+
+# --------------------------------------------------------------------------- concurrency
+
+
+def test_a_second_command_on_the_same_directory_is_refused(tmp_path: Path) -> None:
+    with (
+        run_lock(tmp_path),
+        pytest.raises(Rq1BusyError, match="already working"),
+        run_lock(tmp_path),
+    ):
+        pass
+    with run_lock(tmp_path):  # released
+        pass
+
+
+def test_concurrent_batch_state_updates_keep_every_entry(tmp_path: Path) -> None:
+    import threading
+
+    state = BatchState(tmp_path / "state.json")
+
+    def add(prefix: str) -> None:
+        for index in range(50):
+            BatchState(state.path).add(f"{prefix}{index}", [A])
+
+    threads = [threading.Thread(target=add, args=(prefix,)) for prefix in "xyz"]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(state.pending()) == 150
 
 
 # --------------------------------------------------------------------------- sample stage

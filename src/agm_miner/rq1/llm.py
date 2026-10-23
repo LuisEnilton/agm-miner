@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import anthropic
+import httpx2
 from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
 from anthropic.types.messages.batch_create_params import Request
 
@@ -34,6 +35,10 @@ class LLMAuthError(RuntimeError):
 
 class LLMRequestError(RuntimeError):
     """A Claude API call failed in a way retrying will not fix."""
+
+
+class LLMNotFoundError(LLMRequestError):
+    """The resource does not exist (e.g. a batch whose results expired after 29 days)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,14 +163,20 @@ class LLMClient:
                 self._sleep(self._poll_seconds)
 
     def batch_results(self, batch_id: str) -> Iterator[LLMResult]:
-        for entry in self._call(self.sdk.messages.batches.results, batch_id):
-            outcome = entry.result
-            if outcome.type == "succeeded":
-                yield result_from_message(entry.custom_id, outcome.message)
-            elif outcome.type == "errored":
-                yield LLMResult(entry.custom_id, "errored", error=str(outcome.error))
-            else:  # canceled / expired: safe to submit again
-                yield LLMResult(entry.custom_id, outcome.type)
+        entries = self._call(self.sdk.messages.batches.results, batch_id)
+        try:
+            for entry in entries:
+                outcome = entry.result
+                if outcome.type == "succeeded":
+                    yield result_from_message(entry.custom_id, outcome.message)
+                elif outcome.type == "errored":
+                    yield LLMResult(entry.custom_id, "errored", error=str(outcome.error))
+                else:  # canceled / expired: safe to submit again
+                    yield LLMResult(entry.custom_id, outcome.type)
+        except (anthropic.APIError, httpx2.HTTPError) as exc:
+            # The results are streamed: the connection can fail after the first lines. The batch
+            # stays pending, so running the command again collects it.
+            raise LLMRequestError(f"Reading the results of batch {batch_id} failed: {exc}") from exc
 
     # ------------------------------------------------------------------ single requests
 
@@ -202,6 +213,8 @@ class LLMClient:
             ) from exc
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as exc:
             raise LLMAuthError(f"Claude API rejected the credentials: {exc.message}") from exc
+        except anthropic.NotFoundError as exc:
+            raise LLMNotFoundError(f"Claude API: not found ({exc.message})") from exc
         except anthropic.APIStatusError as exc:
             raise LLMRequestError(
                 f"Claude API request failed with status {exc.status_code}: {exc.message}"

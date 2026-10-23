@@ -86,6 +86,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
         from agm_miner.rq1.llm import LLMAuthError, LLMRequestError
+        from agm_miner.rq1.store import Rq1BusyError
         from agm_miner.runs import StageBusyError, interrupt_signals
         from agm_miner.stages.mining import RepositoryLookupError
         from agm_miner.stages.selection import SelectionError
@@ -108,6 +109,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             GitHubRequestError,
             LLMAuthError,
             LLMRequestError,
+            Rq1BusyError,
             SelectionError,
             RepositoryLookupError,
             FileNotFoundError,

@@ -15,6 +15,7 @@ import polars as pl
 from agm_miner.analysis.datasets import ANALYSIS_MANIFEST
 from agm_miner.config import Rq1Config
 from agm_miner.rq1.sampling import stratified_sample
+from agm_miner.rq1.store import run_lock
 from agm_miner.rq1.units import load_units
 from agm_miner.runs import code_version
 
@@ -44,6 +45,11 @@ def _write_manifest(path: Path, gold_dir: Path, config: Rq1Config, **details: An
 
 def sample_sections(gold_dir: Path, output_dir: Path, config: Rq1Config) -> dict[str, Any]:
     """Stratified label-creation sample of the sections with text (``sample.parquet``)."""
+    with run_lock(output_dir):
+        return _sample_sections(gold_dir, output_dir, config)
+
+
+def _sample_sections(gold_dir: Path, output_dir: Path, config: Rq1Config) -> dict[str, Any]:
     units = load_units(gold_dir)
     sample = stratified_sample(
         units,

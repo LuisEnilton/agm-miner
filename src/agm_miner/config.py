@@ -29,8 +29,9 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     github_token: SecretStr | None = Field(default=None, alias="GITHUB_TOKEN")
-    # Claude API key for the RQ1 content coding (agm rq1 ...); never printed.
+    # LLM credentials for the RQ1 content coding (agm rq1 ...); never printed.
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+    openrouter_api_key: SecretStr | None = Field(default=None, alias="OPENROUTER_API_KEY")
     database_url: str = Field(alias="DATABASE_URL")
 
     data_dir: Path = Field(default=Path("data"), alias="DATA_DIR")
@@ -254,8 +255,14 @@ class Rq1Config(_StrictModel):
     # Section lengths (words) separating the short / medium / long strata.
     length_bins: list[int] = Field(default_factory=lambda: [50, 150])
     seed: int = 20261022
-    # Models and effort per phase (the Claude API no longer accepts sampling parameters, so
-    # stability is measured, not fixed: see agm rq1 validate).
+    # Where the models run: "anthropic" (Claude through the official SDK, Batches API; the final
+    # collection) or "openrouter" (any OpenRouter model, e.g. free ones to test the pipeline).
+    provider: Literal["anthropic", "openrouter"] = "anthropic"
+    # OpenRouter free models allow 20 requests per minute.
+    openrouter_requests_per_minute: int = 20
+    # Models and effort per phase, as the provider names them. Effort applies to Claude only.
+    # (The Claude API no longer accepts sampling parameters, so stability is measured, not
+    # fixed: see agm rq1 validate.)
     propose_model: str = "claude-opus-5-5"
     propose_effort: str = "high"
     consolidate_model: str = "claude-opus-5-5"
@@ -266,6 +273,10 @@ class Rq1Config(_StrictModel):
     chunk_sections: int = 30
     # Blind validation sample labelled by hand.
     validation_size: int = 300
+
+    def model_for(self, phase: str) -> tuple[str, str]:
+        """(model, effort) of a phase: propose, consolidate or classify."""
+        return getattr(self, f"{phase}_model"), getattr(self, f"{phase}_effort")
 
 
 class StudyConfig(_StrictModel):

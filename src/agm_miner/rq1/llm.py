@@ -51,6 +51,8 @@ class LLMResult:
     stop_reason: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
     error: str | None = None
+    # Upstream provider that actually answered (OpenRouter routes a model to several).
+    served_by: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -64,6 +66,7 @@ class LLMResult:
             "stop_reason": self.stop_reason,
             "usage": dict(self.usage),
             "error": self.error,
+            "served_by": self.served_by,
         }
 
     @classmethod

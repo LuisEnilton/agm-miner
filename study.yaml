@@ -47,13 +47,19 @@ rq1:
   per_repo_cap: 5
   length_bins: [50, 150]
   seed: 20261022
-  # Labels are created with Claude Opus 5.5 and every section is classified with Claude
-  # Sonnet 5.5; human agreement on a blind sample checks the choice (agm rq1 validate).
-  propose_model: claude-opus-5-5
+  # TESTING PHASE: the pipeline runs on a free OpenRouter model (`agm rq1 models` lists the free
+  # ones with structured outputs). Free models allow 20 requests/minute and 50/day (1000/day after
+  # buying 10 credits); answers are cached, so a run stopped by the daily limit continues later.
+  #
+  # FINAL COLLECTION: set provider to anthropic and use the commented models (labels by Claude
+  # Opus 5.5, classification by Claude Sonnet 5.5), then redo the codebook with them. Cache keys
+  # and output folders include the provider and model, so test answers never mix with final ones.
+  provider: openrouter
+  propose_model: nvidia/nemotron-3-super-120b-a12b:free       # claude-opus-5-5
   propose_effort: high
-  consolidate_model: claude-opus-5-5
+  consolidate_model: nvidia/nemotron-3-super-120b-a12b:free   # claude-opus-5-5
   consolidate_effort: high
-  classify_model: claude-sonnet-5-5
+  classify_model: nvidia/nemotron-3-super-120b-a12b:free      # claude-sonnet-5-5
   classify_effort: low
   chunk_sections: 30
   validation_size: 300

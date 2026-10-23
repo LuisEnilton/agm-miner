@@ -457,10 +457,30 @@ manifesto ao lado de cada resultado. As respostas do LLM ficam em cache em disco
 Batches API ficam registrados, então um comando interrompido continua de onde parou sem pagar de
 novo pelo que já foi respondido.
 
-A credencial do Claude vem de `ANTHROPIC_API_KEY` no `.env` ou de um login feito com
-`ant auth login`.
+### Provedores: testar de graça, coletar com o Claude
+
+O provedor dos modelos é escolhido em `rq1.provider` no `study.yaml`:
+
+| | `openrouter` (fase de testes, configuração atual) | `anthropic` (coleta final) |
+|---|---|---|
+| Modelos | qualquer modelo do OpenRouter; hoje `nvidia/nemotron-3-super-120b-a12b:free` | Claude Opus 5.5 (labels) e Claude Sonnet 5.5 (classificação) |
+| Credencial | `OPENROUTER_API_KEY` no `.env` | `ANTHROPIC_API_KEY` no `.env` ou `ant auth login` |
+| Muitos pedidos | um a um, 20 por minuto | Batches API (metade do preço, assíncrona) |
+| Limite | modelos gratuitos: 50 requisições por dia (1.000 depois de comprar 10 créditos) | o da conta |
+
+Ao atingir o limite diário, o comando para com uma mensagem e mantém tudo o que já foi
+respondido; basta rodar o mesmo comando depois que o limite renovar. Os modelos gratuitos podem
+registrar os prompts: se o OpenRouter responder que não há endpoint compatível com a sua política
+de dados, libere os modelos gratuitos em https://openrouter.ai/settings/privacy.
+
+**Para passar à coleta final**, troque `provider` para `anthropic` e use os modelos indicados nos
+comentários do `study.yaml`. O codebook deve ser refeito com o Claude, porque os labels do artigo
+precisam vir dos modelos finais. As respostas ficam separadas por provedor e modelo no cache e nas
+pastas de saída, então os testes nunca se misturam com a coleta.
 
 ```bash
+poetry run agm rq1 models            # modelos gratuitos do OpenRouter com saída estruturada
+poetry run agm rq1 smoke             # 1 requisição de teste: confere chave, modelo e schema
 poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
 ```
 

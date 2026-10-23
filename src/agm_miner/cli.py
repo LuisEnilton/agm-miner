@@ -492,5 +492,66 @@ def rq1_sample(
     _print(sample_sections(gold_dir, output_dir, config))
 
 
+@rq1_app.command("models")
+@_handle_errors
+def rq1_models() -> None:
+    """Free OpenRouter models that accept structured outputs (the list changes often)."""
+    from agm_miner.rq1.backends import list_free_structured_models
+
+    _print(list_free_structured_models())
+
+
+SMOKE_SCHEMA = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}, "echo": {"type": "string"}},
+    "required": ["ok", "echo"],
+    "additionalProperties": False,
+}
+
+
+@rq1_app.command("smoke")
+@_handle_errors
+def rq1_smoke(
+    phase: Annotated[
+        str, typer.Option(help="Which phase's model to try: propose, consolidate or classify.")
+    ] = "classify",
+    study_path: StudyOption = None,
+) -> None:
+    """One tiny request to the configured provider: checks the key, the model and that it
+    returns the requested JSON schema, before spending a day's quota."""
+    from agm_miner.rq1.backends import PromptRequest, make_backend
+
+    if phase not in ("propose", "consolidate", "classify"):
+        raise typer.BadParameter("phase must be propose, consolidate or classify")
+    settings, study = _context(study_path)
+    backend = make_backend(settings, study.rq1, phase)
+    result = backend.complete(
+        PromptRequest(
+            custom_id="smoke",
+            system="You answer with the JSON object requested and nothing else.",
+            user='Set "ok" to true and "echo" to the word agm.',
+            schema=SMOKE_SCHEMA,
+            max_tokens=2_000,
+            schema_name="smoke",
+        )
+    )
+    try:
+        answer = json.loads(result.text or "")
+    except json.JSONDecodeError:
+        answer = None
+    _print(
+        {
+            "provider": backend.provider,
+            "model": backend.model,
+            "served_by": result.served_by,
+            "status": result.status,
+            "error": result.error,
+            "usage": result.usage,
+            "answer": answer if answer is not None else result.text,
+            "schema_ok": isinstance(answer, dict) and answer.get("echo") == "agm",
+        }
+    )
+
+
 if __name__ == "__main__":
     app()

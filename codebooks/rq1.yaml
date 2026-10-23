@@ -1,0 +1,195 @@
+name: rq1
+version: draft-a246ea20
+description: ''
+source: 'agm rq1 consolidate (gemini gemini-3.5-flash-lite; induce-v1, align-v1, map-v1) from 146 labels
+  proposed by gemini-3.5-flash-lite (propose-v2) for 134 sections; reference: Chatlatanagulchai et al.
+  2025, arXiv:2511.12884, Table 3'
+categories:
+- id: code_style_and_standards
+  name: Code Style and Standards
+  group: Development Standards
+  definition: Rules, formatting conventions, syntax requirements, and structural guidelines for writing
+    source code.
+  include: Apply when instructions specify how code should be formatted, styled, organized, or structured.
+  exclude: 'Near miss: coding best practices which covers high-level design patterns.'
+  examples:
+  - coding style guidelines
+  - code formatting and organization
+  - frontend coding standards
+  literature: 'Agent READMEs: Implementation Details'
+- id: coding_best_practices_and_principles
+  name: Coding Best Practices and Principles
+  group: Development Standards
+  definition: Directives on software design principles like DRY, KISS, YAGNI, error handling patterns,
+    and clean code standards.
+  include: Apply when instructions guide architectural decisions or programming practices to ensure maintainability
+    and robust error handling.
+  exclude: 'Near miss: code style and standards which focuses strictly on formatting and syntax.'
+  examples:
+  - coding best practices
+  - error handling patterns
+  - fail fast practices
+  literature: 'Agent READMEs: Implementation Details'
+- id: architecture_and_module_organization
+  name: Architecture and Module Organization
+  group: System Design
+  definition: Guidelines on system layers, module boundaries, component responsibilities, and directory
+    structure rules.
+  include: Apply when instructions dictate where specific logic should reside or how components interact.
+  exclude: 'Near miss: codebase structure overview which simply maps repository contents.'
+  examples:
+  - architectural boundaries
+  - code architecture rules
+  - component organization
+  literature: 'Agent READMEs: Architecture'
+- id: codebase_and_project_overview
+  name: Codebase and Project Overview
+  group: System Design
+  definition: High-level summaries, directory layouts, and descriptive overviews of the repository or
+    software application.
+  include: Apply when sections provide a reference map of the project or describe its high-level purpose
+    without instructing behavior.
+  exclude: 'Near miss: architecture and module organization which focuses on rules for placing code.'
+  examples:
+  - project overview
+  - codebase structure
+  - directory tree overview
+  literature: 'Agent READMEs: System Overview'
+- id: testing_and_quality_assurance
+  name: Testing and Quality Assurance
+  group: Testing and Validation
+  definition: Instructions, commands, and best practices for writing, structuring, and executing unit
+    or integration tests.
+  include: Apply when instructions pertain to testing frameworks, test execution commands, or test coverage
+    targets.
+  exclude: 'Near miss: validation workflow which covers general pre-edit verification steps.'
+  examples:
+  - testing commands
+  - integration testing
+  - test structure guidelines
+  literature: 'Agent READMEs: Testing'
+- id: build_and_development_environment
+  name: Build and Development Environment
+  group: Workflow and Environment
+  definition: Specifications for setting up the development environment, toolchain requirements, compiler
+    versions, and build commands.
+  include: Apply when instructions cover local server setup, dependency tools, or project build requirements.
+  exclude: 'Near miss: deployment execution rules which focus on production environments.'
+  examples:
+  - build and test instructions
+  - development environment setup
+  - environment prerequisites
+  literature: 'Agent READMEs: Configuration & Environment'
+- id: version_control_and_commits
+  name: Version Control and Commits
+  group: Workflow and Environment
+  definition: Rules and conventions for writing commit messages, opening pull requests, and managing git
+    branches.
+  include: Apply when instructions specify how commits, PRs, or version control synchronization must be
+    handled.
+  exclude: 'Near miss: contribution guidelines which may include broader checklist steps.'
+  examples:
+  - commit message guidelines
+  - pull request guidelines
+  - version control workflow
+  literature: 'Agent READMEs: Development Process'
+- id: documentation_maintenance
+  name: Documentation Maintenance
+  group: Documentation and Release
+  definition: Guidelines and workflows for generating, updating, and synchronizing documentation, changelogs,
+    and README files.
+  include: Apply when instructions mandate keeping documentation or changelogs aligned with code modifications.
+  exclude: 'Near miss: documentation references which list existing documentation files.'
+  examples:
+  - documentation maintenance
+  - changelog maintenance rules
+  - documentation update workflow
+  literature: 'Agent READMEs: Documentation'
+- id: security_and_safety_rules
+  name: Security and Safety Rules
+  group: Governance and Constraints
+  definition: Directives protecting user data, preventing security vulnerabilities, handling credentials
+    securely, and avoiding destructive actions.
+  include: Apply when instructions mandate security policies, environment protection, or safe handling
+    of sensitive data.
+  exclude: 'Near miss: operational constraints which covers general behavioral prohibitions.'
+  examples:
+  - security guidelines
+  - security and safety rules
+  - security policy rules
+  literature: 'Agent READMEs: Security'
+- id: operational_constraints_and_persona
+  name: Operational Constraints and Persona
+  group: Governance and Constraints
+  definition: Mandatory behavioral rules, communication constraints, persona guidelines, prohibited actions,
+    and script restrictions.
+  include: Apply when instructions dictate non-negotiable agent behaviors, prohibited coding practices,
+    or communication language.
+  exclude: 'Near miss: security and safety rules which focus specifically on data and vulnerability protection.'
+  examples:
+  - mandatory agent rules
+  - operational constraints
+  - script execution restrictions
+  literature: 'Agent READMEs: AI Integration'
+- id: database_and_storage_management
+  name: Database and Storage Management
+  group: Data and Performance
+  definition: Conventions, naming rules, query optimization, and schema design best practices for databases.
+  include: Apply when instructions deal with database tables, primary keys, queries, or data persistence
+    models.
+  exclude: 'Near miss: performance optimization guidelines which cover general runtime overhead.'
+  examples:
+  - database conventions
+  - database query optimization
+  - database schema design
+  literature: 'Agent READMEs: Implementation Details'
+- id: performance_and_optimization
+  name: Performance and Optimization
+  group: Data and Performance
+  definition: Directives on avoiding runtime bottlenecks, memory management rules, and cryptographic compatibility
+    constraints.
+  include: Apply when instructions target resource usage efficiency, memory safety, or performance scaling.
+  exclude: 'Near miss: database query optimization which applies strictly to database interactions.'
+  examples:
+  - performance optimization guidelines
+  - memory management rules
+  - cryptographic compatibility rules
+  literature: 'Agent READMEs: Performance'
+- id: tool_and_skill_usage
+  name: Tool and Skill Usage
+  group: Agent Execution
+  definition: Instructions directing the AI agent on loading specific specialized skills, activating tools,
+    and routing tasks.
+  include: Apply when instructions explain how and when the agent should invoke external tools, skills,
+    or rulesets.
+  exclude: 'Near miss: interaction guidelines which focus on conversational behavior.'
+  examples:
+  - skill and tool routing
+  - skill usage
+  - tool activation procedures
+  literature: 'Agent READMEs: AI Integration'
+- id: deployment_and_release_workflows
+  name: Deployment and Release Workflows
+  group: Workflow and Environment
+  definition: Step-by-step procedures for managing container deployments, publishing releases, and running
+    post-release validations.
+  include: Apply when instructions cover release pipelines, approval gates, or deployment execution steps.
+  exclude: 'Near miss: build and development environment which focuses on local development setup.'
+  examples:
+  - deployment execution rules
+  - release workflow automation
+  - release verification steps
+  literature: 'Agent READMEs: DevOps'
+- id: ui_and_frontend_architecture
+  name: UI and Frontend Architecture
+  group: System Design
+  definition: Rules, component behaviors, and styling standards for constructing user interfaces and frontend
+    interactions.
+  include: Apply when instructions specify user interface lifecycles, styling standards, or component
+    views.
+  exclude: 'Near miss: code style and standards which covers general backend or project-wide formatting.'
+  examples:
+  - ui architecture standards
+  - ui styling standards
+  - user interface behavior
+  literature: 'Agent READMEs: UI/UX'

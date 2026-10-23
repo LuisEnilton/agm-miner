@@ -33,6 +33,8 @@ poetry run agm status [--watch]     # o que está rodando agora (lê o progresso
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
 poetry run agm rq1 sample           # RQ1: amostra para a criação de labels com LLM
 poetry run agm rq1 propose | consolidate   # RQ1: rótulos livres → rascunho do codebook
+poetry run agm rq1 classify | saturation   # RQ1: categorias de todas as seções / cobertura
+poetry run agm rq1 validate export | llm | score   # RQ1: planilha cega, réplicas, kappa
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
 poetry run ruff check . && poetry run ruff format .

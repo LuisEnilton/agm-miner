@@ -43,6 +43,11 @@ rq1_app = typer.Typer(
     help="RQ1 content coding: create labels with an LLM on a sample, then classify every section.",
 )
 app.add_typer(rq1_app, name="rq1")
+rq1_validate_app = typer.Typer(
+    no_args_is_help=True,
+    help="Validate the classification against hand labels (export, llm, score).",
+)
+rq1_app.add_typer(rq1_validate_app, name="validate")
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -87,7 +92,12 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
         from agm_miner.rq1.llm import LLMAuthError, LLMRequestError
         from agm_miner.rq1.prompts import InvalidAnswer
-        from agm_miner.rq1.stages import IncompleteProposalsError, SampleMismatchError
+        from agm_miner.rq1.stages import (
+            IncompleteProposalsError,
+            InvalidSheetError,
+            SampleMismatchError,
+            ValidationSheetExistsError,
+        )
         from agm_miner.rq1.store import Rq1BusyError
         from agm_miner.runs import StageBusyError, interrupt_signals
         from agm_miner.stages.mining import RepositoryLookupError
@@ -115,6 +125,8 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             InvalidAnswer,
             SampleMismatchError,
             IncompleteProposalsError,
+            InvalidSheetError,
+            ValidationSheetExistsError,
             SelectionError,
             RepositoryLookupError,
             FileNotFoundError,
@@ -627,6 +639,167 @@ def rq1_smoke(
             "answer": answer if answer is not None else result.text,
             "schema_ok": isinstance(answer, dict) and answer.get("echo") == "agm",
         }
+    )
+
+
+CodebookOption = Annotated[
+    Path | None, typer.Option("--codebook", help="Curated codebook (default: rq1.codebook).")
+]
+
+
+def _rq1_backend_run(stage: str, phase: str, study_path: Path | None, gold: Path | None, run):
+    """Shared plumbing of the LLM commands: backend of ``phase``, live progress, JSON result."""
+    from agm_miner.progress import Progress, publishing
+    from agm_miner.rq1.backends import make_backend
+
+    settings, study = _context(study_path)
+    gold_dir, output_dir = _rq1_dirs(settings, gold)
+    backend = make_backend(settings, study.rq1, phase)
+    with publishing(Progress(stage)) as progress, _showing_progress():
+        result = run(gold_dir, output_dir, study, backend, progress)
+    _print(result)
+
+
+@rq1_app.command("classify")
+@_handle_errors
+def rq1_classify(
+    gold: GoldOption = None,
+    codebook: CodebookOption = None,
+    limit: Annotated[
+        int | None, typer.Option(min=1, help="Send at most N requests (a pilot run).")
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Categories of every section with text (rq1.classify_model), file by file. Cached and
+    resumable: run it again after an interruption or a daily limit."""
+    from agm_miner.rq1.stages import classify_sections
+
+    _rq1_backend_run(
+        "RQ1 CLASSIFY",
+        "classify",
+        study_path,
+        gold,
+        lambda gold_dir, output_dir, study, backend, progress: classify_sections(
+            gold_dir,
+            output_dir,
+            study.rq1,
+            backend,
+            codebook_path=codebook or study.rq1.codebook,
+            limit=limit,
+            progress=progress,
+        ),
+    )
+
+
+@rq1_app.command("saturation")
+@_handle_errors
+def rq1_saturation(
+    gold: GoldOption = None, codebook: CodebookOption = None, study_path: StudyOption = None
+) -> None:
+    """Classify a fresh sample to measure how many sections fit no category."""
+    from agm_miner.rq1.stages import saturation
+
+    _rq1_backend_run(
+        "RQ1 SATURATION",
+        "classify",
+        study_path,
+        gold,
+        lambda gold_dir, output_dir, study, backend, progress: saturation(
+            gold_dir,
+            output_dir,
+            study.rq1,
+            backend,
+            codebook_path=codebook or study.rq1.codebook,
+            progress=progress,
+        ),
+    )
+
+
+@rq1_validate_app.command("export")
+@_handle_errors
+def rq1_validate_export(
+    gold: GoldOption = None,
+    codebook: CodebookOption = None,
+    size: Annotated[int | None, typer.Option(min=1, help="Override rq1.validation_size.")] = None,
+    force: Annotated[bool, typer.Option(help="Replace an existing sheet.")] = False,
+    study_path: StudyOption = None,
+) -> None:
+    """Blind sheet (CSV) to label by hand: one 0/1 column per category, no LLM answers."""
+    from agm_miner.rq1.stages import export_validation
+
+    settings, study = _context(study_path)
+    gold_dir, output_dir = _rq1_dirs(settings, gold)
+    _print(
+        export_validation(
+            gold_dir,
+            output_dir,
+            study.rq1,
+            codebook_path=codebook or study.rq1.codebook,
+            size=size,
+            force=force,
+        )
+    )
+
+
+@rq1_validate_app.command("llm")
+@_handle_errors
+def rq1_validate_llm(
+    gold: GoldOption = None,
+    codebook: CodebookOption = None,
+    replicate: Annotated[
+        int, typer.Option(min=1, help="1 for the LLM labels, 2+ for stability repetitions.")
+    ] = 1,
+    study_path: StudyOption = None,
+) -> None:
+    """The LLM's labels for the validation sample (rq1.classify_model)."""
+    from agm_miner.rq1.stages import validation_llm
+
+    _rq1_backend_run(
+        "RQ1 VALIDATE",
+        "classify",
+        study_path,
+        gold,
+        lambda gold_dir, output_dir, study, backend, progress: validation_llm(
+            gold_dir,
+            output_dir,
+            study.rq1,
+            backend,
+            codebook_path=codebook or study.rq1.codebook,
+            replicate=replicate,
+            progress=progress,
+        ),
+    )
+
+
+@rq1_validate_app.command("score")
+@_handle_errors
+def rq1_validate_score(
+    human: Annotated[
+        Path | None,
+        typer.Option(help="The filled validation sheet (CSV); without it, only the stability."),
+    ] = None,
+    retest: Annotated[
+        Path | None, typer.Option(help="A later re-labelling of part of the sheet.")
+    ] = None,
+    gold: GoldOption = None,
+    codebook: CodebookOption = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Agreement: human x LLM, LLM x LLM (stability) and human x human (re-test)."""
+    from agm_miner.rq1.stages import score_validation
+
+    settings, study = _context(study_path)
+    _, output_dir = _rq1_dirs(settings, gold)
+    _print(
+        score_validation(
+            output_dir,
+            study.rq1,
+            codebook_path=codebook or study.rq1.codebook,
+            human=human,
+            retest=retest,
+            provider=study.rq1.provider,
+            model=study.rq1.classify_model,
+        )
     )
 
 

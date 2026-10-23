@@ -57,12 +57,14 @@ rq1:
   # Opus 5.5, classification by Claude Sonnet 5.5), then redo the codebook with them. Cache keys
   # and output folders include the provider and model, so test answers never mix with final ones.
   provider: gemini
-  gemini_requests_per_minute: 10
+  gemini_requests_per_minute: 12   # free tier of gemini-3.5-flash-lite: 15/min, 500/day
   propose_model: gemini-3.5-flash-lite            # claude-opus-5-5
   propose_effort: high
   consolidate_model: gemini-3.5-flash-lite        # claude-opus-5-5
   consolidate_effort: high
   classify_model: gemini-3.5-flash-lite           # claude-sonnet-5-5
   classify_effort: low
+  codebook: codebooks/rq1.yaml   # curated codebook used by classify, saturation and validate
+  saturation_size: 100
   chunk_sections: 30
   validation_size: 300

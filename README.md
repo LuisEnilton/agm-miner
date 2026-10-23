@@ -440,6 +440,33 @@ Como esses dois critérios são aplicados na análise, dá para medir o efeito d
 (análise de sensibilidade) rodando `agm analyze --study outro.yaml --output <outra pasta>`
 sobre o mesmo export.
 
+## RQ1: categorias de conteúdo
+
+A RQ1 é respondida em duas fases sobre as seções da tabela `rq1_sections` (saída do `agm analyze`):
+
+1. **Criação dos labels** numa amostra estratificada: o Claude Opus 5.5 propõe rótulos livres para
+   cada seção e depois os consolida num rascunho de codebook, usando como referência os 16 rótulos
+   do *Agent READMEs* (Chatlatanagulchai et al., 2025, em `codebooks/seed_agent_readmes.yaml`). Você
+   revisa o rascunho e salva a versão final em `codebooks/rq1.yaml`.
+2. **Classificação** de todas as seções com o Claude Sonnet 5.5 contra o codebook final, validada
+   numa amostra cega rotulada à mão (kappa de Cohen).
+
+Os comandos ficam em `agm rq1 ...` e usam a seção `rq1:` do `study.yaml`. Assim como a análise, eles
+não usam o banco: leem a saída do `analyze` e gravam em `DATA_DIR/rq1/<nome da saída>/`, com um
+manifesto ao lado de cada resultado. As respostas do LLM ficam em cache em disco, e os lotes da
+Batches API ficam registrados, então um comando interrompido continua de onde parou sem pagar de
+novo pelo que já foi respondido.
+
+A credencial do Claude vem de `ANTHROPIC_API_KEY` no `.env` ou de um login feito com
+`ant auth login`.
+
+```bash
+poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
+```
+
+Os demais comandos (`propose`, `consolidate`, `saturation`, `classify`, `validate`) vêm nos
+próximos PRs.
+
 ## Testes
 
 ```bash

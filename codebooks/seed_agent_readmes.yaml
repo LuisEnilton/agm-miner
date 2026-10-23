@@ -1,0 +1,72 @@
+# Taxonomy of Chatlatanagulchai et al. (2025), "Agent READMEs: An Empirical Study of Context Files
+# for Agentic Coding" (arXiv:2511.12884), Table 3: 16 labels in 5 groups, assigned per file.
+# Used only as a reference when consolidating the labels proposed for this study (agm rq1
+# consolidate), so the resulting codebook can be mapped onto related work.
+name: agent_readmes
+version: "2025"
+source: "Chatlatanagulchai et al. 2025, arXiv:2511.12884, Table 3"
+categories:
+  - id: system_overview
+    name: System Overview
+    group: General
+    definition: General project overview or key features.
+  - id: ai_integration
+    name: AI Integration
+    group: General
+    definition: Desired behavior and roles for the agent, and how to integrate other AI tools.
+  - id: documentation
+    name: Documentation
+    group: General
+    definition: Supplementary documents, links, or references.
+  - id: architecture
+    name: Architecture
+    group: Implementation
+    definition: High-level structure, design principles, or key components.
+  - id: implementation_details
+    name: Implementation Details
+    group: Implementation
+    definition: Specifics for implementing code or components, including coding style.
+  - id: build_and_run
+    name: Build and Run
+    group: Build
+    definition: Compiling, running, and key commands.
+  - id: testing
+    name: Testing
+    group: Build
+    definition: Procedures and commands for automated tests.
+  - id: configuration_environment
+    name: Configuration & Environment
+    group: Build
+    definition: Setting up the development or production environment.
+  - id: devops
+    name: DevOps
+    group: Build
+    definition: Deployment, release, and operations such as CI/CD.
+  - id: development_process
+    name: Development Process
+    group: Management
+    definition: Workflow, including version control guidelines such as Git.
+  - id: project_management
+    name: Project Management
+    group: Management
+    definition: Planning, organization, and management of the project.
+  - id: maintenance
+    name: Maintenance
+    group: Quality
+    definition: Improving readability and detecting or resolving bugs.
+  - id: debugging
+    name: Debugging
+    group: Quality
+    definition: Error handling and identifying or resolving issues.
+  - id: performance
+    name: Performance
+    group: Quality
+    definition: System performance, quality assurance, and optimization.
+  - id: security
+    name: Security
+    group: Quality
+    definition: Security considerations, vulnerabilities, and best practices.
+  - id: ui_ux
+    name: UI/UX
+    group: Quality
+    definition: User interface and user experience guidelines.

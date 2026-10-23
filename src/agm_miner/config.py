@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     github_token: SecretStr | None = Field(default=None, alias="GITHUB_TOKEN")
+    # Claude API key for the RQ1 content coding (agm rq1 ...); never printed.
+    anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     database_url: str = Field(alias="DATABASE_URL")
 
     data_dir: Path = Field(default=Path("data"), alias="DATA_DIR")
@@ -57,6 +59,10 @@ class Settings(BaseSettings):
     @property
     def gold_dir(self) -> Path:
         return self.data_dir / "gold"
+
+    @property
+    def rq1_dir(self) -> Path:
+        return self.data_dir / "rq1"
 
 
 @lru_cache
@@ -237,12 +243,38 @@ class AnalysisConfig(_StrictModel):
     )
 
 
+class Rq1Config(_StrictModel):
+    """RQ1 content coding: label creation with an LLM on a sample, then classification of every
+    section against the curated codebook (see src/agm_miner/rq1/)."""
+
+    # Label-creation sample: stratified by tool x artifact kind x length, at most
+    # ``per_repo_cap`` sections per repository so large repositories do not dominate.
+    sample_size: int = 400
+    per_repo_cap: int = 5
+    # Section lengths (words) separating the short / medium / long strata.
+    length_bins: list[int] = Field(default_factory=lambda: [50, 150])
+    seed: int = 20261022
+    # Models and effort per phase (the Claude API no longer accepts sampling parameters, so
+    # stability is measured, not fixed: see agm rq1 validate).
+    propose_model: str = "claude-opus-5-5"
+    propose_effort: str = "high"
+    consolidate_model: str = "claude-opus-5-5"
+    consolidate_effort: str = "high"
+    classify_model: str = "claude-sonnet-5-5"
+    classify_effort: str = "low"
+    # Sections per classification request (a file's sections are sent together, in chunks).
+    chunk_sections: int = 30
+    # Blind validation sample labelled by hand.
+    validation_size: int = 300
+
+
 class StudyConfig(_StrictModel):
     version: int = 1
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     selection: SelectionConfig = Field(default_factory=SelectionConfig)
     mining: MiningConfig = Field(default_factory=MiningConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+    rq1: Rq1Config = Field(default_factory=Rq1Config)
 
     def snapshot(self) -> dict:
         return self.model_dump(mode="json")

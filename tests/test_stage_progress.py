@@ -227,3 +227,12 @@ def test_live_mode_draws_the_panel() -> None:
     with publishing(progress), showing_progress("live", console):
         threading.Event().wait(0.7)  # at least one refresh
     assert "acme/api" in output.getvalue()
+
+
+def test_http_libraries_log_only_warnings() -> None:
+    from agm_miner.progress_view import QUIET_LIBRARIES, configure_logging
+
+    configure_logging("INFO", "plain")
+    for library in QUIET_LIBRARIES:
+        assert not logging.getLogger(library).isEnabledFor(logging.INFO)
+        assert logging.getLogger(library).isEnabledFor(logging.WARNING)

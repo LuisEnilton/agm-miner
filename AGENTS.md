@@ -31,6 +31,7 @@ poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silv
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
 poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
+poetry run agm rq1 sample           # RQ1: amostra para a criação de labels com LLM (ANTHROPIC_API_KEY)
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
 poetry run ruff check . && poetry run ruff format .
@@ -57,6 +58,9 @@ src/agm_miner/
   github/client.py    # REST code search + GraphQL, com pacing, quota por bucket e retry limitado
   stages/             # discovery, selection, mining (persistência + concorrência), export
   analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets
+  rq1/                # RQ1 com LLM: units (section_key), sampling, codebook, llm (SDK anthropic,
+                      # Batches), store (cache + estado dos lotes), execution (lotes retomáveis),
+                      # backends (PromptRequest neutro; AnthropicBackend e OpenRouterBackend)
   database/           # models.py (schema), session.py (engine único por URL) e schema.py
                       # (todo comando do CLI recusa um banco fora da revisão head do Alembic)
 ```
@@ -139,6 +143,28 @@ Princípios que precisam ser mantidos:
 Enums são `VARCHAR + CHECK` (`native_enum=False`). O autogenerate **não** detecta valores novos
 num enum: escreva a troca da constraint CHECK à mão, como em `0003`. `tests/test_migrations.py`
 falha se a migração divergir dos modelos.
+
+## RQ1 com LLM ([src/agm_miner/rq1/](src/agm_miner/rq1/))
+
+- Lê só a saída do `analyze` (`rq1_sections`) e grava em `DATA_DIR/rq1/<gold>/` com manifesto, sem
+  banco.
+- Etapas montam `backends.PromptRequest` neutros e chamam o `LLMBackend` de
+  `make_backend(settings, study.rq1, fase)`, escolhido por `rq1.provider`:
+  - `anthropic` (coleta final): o Claude **só** pelo SDK oficial, via `rq1.llm.LLMClient`; trabalho
+    em massa pela Batches API (`execution.execute_batched`), que responde do cache, termina lotes
+    de uma execução interrompida (`BatchState`) e só envia o que falta;
+  - `openrouter` (testes com modelos gratuitos): HTTP com `requests`, ritmo de 20/min, cada
+    resposta no cache assim que chega; o limite diário levanta `DailyLimitError` sem perder nada.
+  - Os dois expõem as esperas por `observe_waits`. Testes usam `FakeSession`/SDK falso.
+- Todo comando que chama o LLM ou grava no diretório da RQ1 roda dentro de `store.run_lock(dir)`:
+  um segundo comando no mesmo diretório falha com `Rq1BusyError` em vez de enviar os mesmos
+  pedidos de novo. A amostra depende só do conteúdo, da semente e da configuração, nunca de ids do
+  banco (`sampling` ordena por `section_key` antes de embaralhar).
+- A chave do cache (`store.request_key`) precisa cobrir tudo o que determina a resposta (fase,
+  provedor, modelo, versão do prompt, hash do codebook, `section_key`). Ao mudar um prompt, mude a
+  versão.
+- Modelos, effort e tamanhos de amostra ficam em `rq1:` no `study.yaml`; o codebook curado fica em
+  `codebooks/` (versionado). Testes usam SDKs/clientes falsos, nunca a API real.
 
 ## Estilo de código
 

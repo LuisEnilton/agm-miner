@@ -440,6 +440,56 @@ Como esses dois critérios são aplicados na análise, dá para medir o efeito d
 (análise de sensibilidade) rodando `agm analyze --study outro.yaml --output <outra pasta>`
 sobre o mesmo export.
 
+## RQ1: categorias de conteúdo
+
+A RQ1 é respondida em duas fases sobre as seções da tabela `rq1_sections` (saída do `agm analyze`):
+
+1. **Criação dos labels** numa amostra estratificada: o Claude Opus 5.5 propõe rótulos livres para
+   cada seção e depois os consolida num rascunho de codebook, usando como referência os 16 rótulos
+   do *Agent READMEs* (Chatlatanagulchai et al., 2025, em `codebooks/seed_agent_readmes.yaml`). Você
+   revisa o rascunho e salva a versão final em `codebooks/rq1.yaml`.
+2. **Classificação** de todas as seções com o Claude Sonnet 5.5 contra o codebook final, validada
+   numa amostra cega rotulada à mão (kappa de Cohen).
+
+Os comandos ficam em `agm rq1 ...` e usam a seção `rq1:` do `study.yaml`. Só um comando por vez
+trabalha em cada diretório da RQ1: um segundo é recusado, para não enviar os mesmos pedidos (e
+pagar) duas vezes. A amostra depende só do conteúdo, da semente e da configuração, então é a mesma
+em qualquer export dos mesmos dados. Assim como a análise, eles
+não usam o banco: leem a saída do `analyze` e gravam em `DATA_DIR/rq1/<nome da saída>/`, com um
+manifesto ao lado de cada resultado. As respostas do LLM ficam em cache em disco, e os lotes da
+Batches API ficam registrados, então um comando interrompido continua de onde parou sem pagar de
+novo pelo que já foi respondido.
+
+### Provedores: testar de graça, coletar com o Claude
+
+O provedor dos modelos é escolhido em `rq1.provider` no `study.yaml`:
+
+| | `openrouter` (fase de testes, configuração atual) | `anthropic` (coleta final) |
+|---|---|---|
+| Modelos | qualquer modelo do OpenRouter; hoje `nvidia/nemotron-3-super-120b-a12b:free` | Claude Opus 5.5 (labels) e Claude Sonnet 5.5 (classificação) |
+| Credencial | `OPENROUTER_API_KEY` no `.env` | `ANTHROPIC_API_KEY` no `.env` ou `ant auth login` |
+| Muitos pedidos | um a um, 20 por minuto | Batches API (metade do preço, assíncrona) |
+| Limite | modelos gratuitos: 50 requisições por dia (1.000 depois de comprar 10 créditos) | o da conta |
+
+Ao atingir o limite diário, o comando para com uma mensagem e mantém tudo o que já foi
+respondido; basta rodar o mesmo comando depois que o limite renovar. Os modelos gratuitos podem
+registrar os prompts: se o OpenRouter responder que não há endpoint compatível com a sua política
+de dados, libere os modelos gratuitos em https://openrouter.ai/settings/privacy.
+
+**Para passar à coleta final**, troque `provider` para `anthropic` e use os modelos indicados nos
+comentários do `study.yaml`. O codebook deve ser refeito com o Claude, porque os labels do artigo
+precisam vir dos modelos finais. As respostas ficam separadas por provedor e modelo no cache e nas
+pastas de saída, então os testes nunca se misturam com a coleta.
+
+```bash
+poetry run agm rq1 models            # modelos gratuitos do OpenRouter com saída estruturada
+poetry run agm rq1 smoke             # 1 requisição de teste: confere chave, modelo e schema
+poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
+```
+
+Os demais comandos (`propose`, `consolidate`, `saturation`, `classify`, `validate`) vêm nos
+próximos PRs.
+
 ## Testes
 
 ```bash

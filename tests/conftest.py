@@ -24,6 +24,16 @@ pytest_plugins = ["tests.db_fixtures"]
 
 
 @pytest.fixture(autouse=True)
+def _fresh_settings() -> Iterator[None]:
+    """Settings are cached per process; tests that change the environment must see it."""
+    from agm_miner.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _require_git(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("git") and shutil.which("git") is None:
         pytest.skip("git executable not available")

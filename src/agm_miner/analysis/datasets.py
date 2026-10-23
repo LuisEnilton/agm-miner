@@ -61,6 +61,18 @@ ANALYSIS_MANIFEST = "analysis_manifest.json"
 _MANUAL_QUERY_PREFIX = "manual:"
 
 
+def latest_analysis(gold_root: Path) -> Path:
+    """Most recent complete analysis output under ``gold_root`` (``DATA_DIR/gold``)."""
+    outputs = sorted(
+        path
+        for path in (gold_root.iterdir() if gold_root.exists() else [])
+        if not path.name.endswith(".partial") and (path / ANALYSIS_MANIFEST).exists()
+    )
+    if not outputs:
+        raise FileNotFoundError(f"No analysis output found in {gold_root} (run `agm analyze`)")
+    return outputs[-1]
+
+
 def load_bronze(bronze_dir: Path) -> dict[str, pl.DataFrame]:
     return {name: pl.read_parquet(bronze_dir / f"{name}.parquet") for name in BRONZE_TABLES}
 

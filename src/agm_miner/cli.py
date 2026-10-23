@@ -9,6 +9,7 @@ agm analyze             build silver/gold analysis datasets from a bronze export
 agm run                 run stages 1-3 in parallel until done, then 4 and 5
 agm status              what is running now and how far it got (also from another terminal)
 agm runs list|funnel    inspect pipeline runs and the selection funnel
+agm rq1 ...             RQ1 content coding with an LLM (sample, propose, classify, validate)
 """
 
 from __future__ import annotations
@@ -37,6 +38,11 @@ app = typer.Typer(
 )
 runs_app = typer.Typer(no_args_is_help=True, help="Inspect pipeline runs.")
 app.add_typer(runs_app, name="runs")
+rq1_app = typer.Typer(
+    no_args_is_help=True,
+    help="RQ1 content coding: create labels with an LLM on a sample, then classify every section.",
+)
+app.add_typer(rq1_app, name="rq1")
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -79,6 +85,8 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         from agm_miner.database.schema import SchemaMismatchError
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
+        from agm_miner.rq1.llm import LLMAuthError, LLMRequestError
+        from agm_miner.rq1.store import Rq1BusyError
         from agm_miner.runs import StageBusyError, interrupt_signals
         from agm_miner.stages.mining import RepositoryLookupError
         from agm_miner.stages.selection import SelectionError
@@ -99,6 +107,9 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             GitError,
             GitHubAuthError,
             GitHubRequestError,
+            LLMAuthError,
+            LLMRequestError,
+            Rq1BusyError,
             SelectionError,
             RepositoryLookupError,
             FileNotFoundError,
@@ -448,6 +459,99 @@ def funnel() -> None:
             {"status": status, "reason": reason, "repositories": count}
             for status, reason, count in rows
         ]
+    )
+
+
+# --------------------------------------------------------------------------- rq1
+
+GoldOption = Annotated[
+    Path | None,
+    typer.Option("--gold", help="Analysis output to code (default: the latest in DATA_DIR/gold)."),
+]
+
+
+def _rq1_dirs(settings: Settings, gold: Path | None) -> tuple[Path, Path]:
+    """The analysis output to read and the RQ1 directory that belongs to it."""
+    from agm_miner.analysis.datasets import latest_analysis
+
+    gold_dir = gold or latest_analysis(settings.gold_dir)
+    return gold_dir, settings.rq1_dir / gold_dir.name
+
+
+@rq1_app.command("sample")
+@_handle_errors
+def rq1_sample(
+    gold: GoldOption = None,
+    size: Annotated[int | None, typer.Option(min=1, help="Override rq1.sample_size.")] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Stratified sample of sections for label creation (rq1.* in study.yaml)."""
+    from agm_miner.rq1.stages import sample_sections
+
+    settings, study = _context(study_path)
+    config = study.rq1 if size is None else study.rq1.model_copy(update={"sample_size": size})
+    gold_dir, output_dir = _rq1_dirs(settings, gold)
+    _print(sample_sections(gold_dir, output_dir, config))
+
+
+@rq1_app.command("models")
+@_handle_errors
+def rq1_models() -> None:
+    """Free OpenRouter models that accept structured outputs (the list changes often)."""
+    from agm_miner.rq1.backends import list_free_structured_models
+
+    _print(list_free_structured_models())
+
+
+SMOKE_SCHEMA = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}, "echo": {"type": "string"}},
+    "required": ["ok", "echo"],
+    "additionalProperties": False,
+}
+
+
+@rq1_app.command("smoke")
+@_handle_errors
+def rq1_smoke(
+    phase: Annotated[
+        str, typer.Option(help="Which phase's model to try: propose, consolidate or classify.")
+    ] = "classify",
+    study_path: StudyOption = None,
+) -> None:
+    """One tiny request to the configured provider: checks the key, the model and that it
+    returns the requested JSON schema, before spending a day's quota."""
+    from agm_miner.rq1.backends import PromptRequest, make_backend
+
+    if phase not in ("propose", "consolidate", "classify"):
+        raise typer.BadParameter("phase must be propose, consolidate or classify")
+    settings, study = _context(study_path)
+    backend = make_backend(settings, study.rq1, phase)
+    result = backend.complete(
+        PromptRequest(
+            custom_id="smoke",
+            system="You answer with the JSON object requested and nothing else.",
+            user='Set "ok" to true and "echo" to the word agm.',
+            schema=SMOKE_SCHEMA,
+            max_tokens=2_000,
+            schema_name="smoke",
+        )
+    )
+    try:
+        answer = json.loads(result.text or "")
+    except json.JSONDecodeError:
+        answer = None
+    _print(
+        {
+            "provider": backend.provider,
+            "model": backend.model,
+            "served_by": result.served_by,
+            "status": result.status,
+            "error": result.error,
+            "usage": result.usage,
+            "answer": answer if answer is not None else result.text,
+            "schema_ok": isinstance(answer, dict) and answer.get("echo") == "agm",
+        }
     )
 
 

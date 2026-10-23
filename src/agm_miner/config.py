@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     github_token: SecretStr | None = Field(default=None, alias="GITHUB_TOKEN")
+    # LLM credentials for the RQ1 content coding (agm rq1 ...); never printed.
+    anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+    openrouter_api_key: SecretStr | None = Field(default=None, alias="OPENROUTER_API_KEY")
     database_url: str = Field(alias="DATABASE_URL")
 
     data_dir: Path = Field(default=Path("data"), alias="DATA_DIR")
@@ -57,6 +60,10 @@ class Settings(BaseSettings):
     @property
     def gold_dir(self) -> Path:
         return self.data_dir / "gold"
+
+    @property
+    def rq1_dir(self) -> Path:
+        return self.data_dir / "rq1"
 
 
 @lru_cache
@@ -237,12 +244,55 @@ class AnalysisConfig(_StrictModel):
     )
 
 
+class Rq1Config(_StrictModel):
+    """RQ1 content coding: label creation with an LLM on a sample, then classification of every
+    section against the curated codebook (see src/agm_miner/rq1/)."""
+
+    # Label-creation sample: stratified by tool x artifact kind x length, at most
+    # ``per_repo_cap`` sections per repository so large repositories do not dominate.
+    sample_size: int = Field(default=400, gt=0)
+    per_repo_cap: int = Field(default=5, gt=0)
+    # Section lengths (words) separating the short / medium / long strata (increasing).
+    length_bins: list[int] = Field(default_factory=lambda: [50, 150])
+    seed: int = 20261022
+    # Where the models run: "anthropic" (Claude through the official SDK, Batches API; the final
+    # collection) or "openrouter" (any OpenRouter model, e.g. free ones to test the pipeline).
+    provider: Literal["anthropic", "openrouter"] = "anthropic"
+    # OpenRouter free models allow 20 requests per minute.
+    openrouter_requests_per_minute: int = Field(default=20, gt=0)
+    # Models and effort per phase, as the provider names them. Effort applies to Claude only.
+    # (The Claude API no longer accepts sampling parameters, so stability is measured, not
+    # fixed: see agm rq1 validate.)
+    propose_model: str = "claude-opus-5-5"
+    propose_effort: str = "high"
+    consolidate_model: str = "claude-opus-5-5"
+    consolidate_effort: str = "high"
+    classify_model: str = "claude-sonnet-5-5"
+    classify_effort: str = "low"
+    # Sections per classification request (a file's sections are sent together, in chunks).
+    chunk_sections: int = Field(default=30, gt=0)
+    # Blind validation sample labelled by hand.
+    validation_size: int = Field(default=300, gt=0)
+
+    @field_validator("length_bins")
+    @classmethod
+    def _increasing_bins(cls, bins: list[int]) -> list[int]:
+        if any(limit <= 0 for limit in bins) or bins != sorted(set(bins)):
+            raise ValueError("length_bins must be positive and strictly increasing")
+        return bins
+
+    def model_for(self, phase: str) -> tuple[str, str]:
+        """(model, effort) of a phase: propose, consolidate or classify."""
+        return getattr(self, f"{phase}_model"), getattr(self, f"{phase}_effort")
+
+
 class StudyConfig(_StrictModel):
     version: int = 1
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
     selection: SelectionConfig = Field(default_factory=SelectionConfig)
     mining: MiningConfig = Field(default_factory=MiningConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+    rq1: Rq1Config = Field(default_factory=Rq1Config)
 
     def snapshot(self) -> dict:
         return self.model_dump(mode="json")

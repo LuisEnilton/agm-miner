@@ -20,6 +20,7 @@ dependencies = [
 	"langdetect (>=1.0.9)",
 	"scipy (>=1.11)",
 	"rich (>=13.8)",
+	"anthropic (>=2.1.0,<3.0.0)",
 ]
 
 [project.scripts]

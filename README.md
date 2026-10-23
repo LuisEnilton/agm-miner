@@ -492,6 +492,11 @@ poetry run agm rq1 smoke             # 1 requisição de teste: confere chave, m
 poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
 poetry run agm rq1 propose           # rótulos livres para cada seção da amostra
 poetry run agm rq1 consolidate       # rascunho do codebook a partir dos rótulos propostos
+poetry run agm rq1 classify          # categorias de todas as seções (codebook de rq1.codebook)
+poetry run agm rq1 saturation        # amostra nova: quantas seções não cabem em nenhuma categoria
+poetry run agm rq1 validate export   # planilha cega para rotular à mão
+poetry run agm rq1 validate llm      # rótulos do LLM na amostra de validação (--replicate 2)
+poetry run agm rq1 validate score    # concordância humano × LLM e LLM × LLM (--human planilha.csv)
 ```
 
 ### Criação dos labels
@@ -525,8 +530,36 @@ cache e são pedidas de novo na próxima execução. Depois de `rq1.max_attempts
 abandonado e aparece em `given_up` no manifesto, para não consumir a cota todo dia. Os prompts têm
 versão (`propose-v2`, `induce-v1`, `align-v1`, `map-v1`): mudar o texto de um prompt exige mudar a versão.
 
-A saturação (`agm rq1 saturation`), a classificação (`classify`) e a validação (`validate`) vêm
-nos próximos PRs.
+### Classificação e validação
+
+5. **`agm rq1 classify`** classifica todas as seções com texto contra o codebook de
+   `rq1.codebook` (`--codebook` para outro). Seções idênticas são classificadas uma vez só. Cada
+   requisição leva até `rq1.chunk_sections` seções de um mesmo arquivo; o `system` traz as
+   instruções e o codebook inteiro (igual em todas as requisições) e avisa que o conteúdo das
+   seções é dado a classificar, não instrução a seguir. Cada seção recebe uma ou mais categorias,
+   ou `other`. `--limit N` faz um piloto com N requisições. Saídas em
+   `classify/<codebook>/<provedor>/<modelo>/`:
+   - `section_labels.parquet`: uma linha por seção e categoria;
+   - `artifact_labels.parquet`: por arquivo e categoria, seções, palavras e fração das palavras;
+   - `repo_labels.parquet`: o mesmo por repositório, para juntar ao `repo_features` pelo
+     `repo_id` na análise de correlação;
+   - `label_prevalence.parquet`: fração de arquivos e de seções com cada categoria, por
+     ferramenta e tipo de arquivo.
+6. **`agm rq1 saturation`** classifica `rq1.saturation_size` seções que não estavam na amostra de
+   criação dos labels e mede quantas caem em `other` e quais categorias não aparecem.
+7. **Validação:**
+   - `agm rq1 validate export` gera `validation/<codebook>/sheet.csv`, uma amostra nova de
+     `rq1.validation_size` seções (`--size` para outro tamanho) com uma coluna por categoria.
+     Ela não mostra as respostas do LLM. Marque `1` (ou `x`) em cada categoria que se aplica e
+     `other` só quando nenhuma se aplica; linhas em branco são ignoradas. O comando nunca
+     sobrescreve uma planilha existente sem `--force`;
+   - `agm rq1 validate llm` classifica a mesma amostra; `--replicate 2` repete a classificação
+     de forma independente, para medir a estabilidade (as APIs não aceitam fixar a amostragem);
+   - `agm rq1 validate score --human planilha.csv` calcula, por categoria, kappa de Cohen,
+     precisão, revocação e F1, com médias e intervalos de confiança de 95% por bootstrap, para
+     humano × LLM, LLM × LLM e, com `--retest`, humano × humano (você rotula de novo parte da
+     planilha depois de alguns dias). Sem `--human`, mede só a estabilidade. Saídas:
+     `scores.json` e `scores.md`.
 
 ## Testes
 

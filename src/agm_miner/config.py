@@ -289,7 +289,12 @@ class Rq1Config(_StrictModel):
     # A request that failed this many times (error, refusal, truncation or an answer outside
     # the requested format) is given up and listed in the manifest instead of retried forever.
     max_attempts: int = Field(default=3, gt=0)
-    # Sections per classification request (a file's sections are sent together, in chunks).
+    # Classification: the curated codebook, sections per request (a file's sections are sent
+    # together, in chunks), the size of the saturation sample (fresh sections classified to
+    # measure how many fit no category) and output budget.
+    codebook: Path = Path("codebooks/rq1.yaml")
+    classify_max_tokens: int = Field(default=8_000, gt=0)
+    saturation_size: int = Field(default=100, gt=0)
     chunk_sections: int = Field(default=30, gt=0)
     # Blind validation sample labelled by hand.
     validation_size: int = Field(default=300, gt=0)

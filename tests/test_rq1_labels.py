@@ -245,6 +245,16 @@ class FakeBackend:
             text = json.dumps({"categories": [CATEGORY]})
         elif request.schema_name == "alignment":
             text = json.dumps({"alignment": [{"category": "testing", "reference": "testing"}]})
+        elif request.schema_name == "classification":
+            ids = [short_id for short_id, _ in _ID_RE.findall(request.user)]
+            text = json.dumps(
+                {
+                    "sections": [
+                        {"id": i, "categories": ["testing"] if int(i[1:]) % 2 else ["docs"]}
+                        for i in ids
+                    ]
+                }
+            )
         elif request.schema_name == "mapping":
             labels = re.findall(r"^- (.+?) \(n=", request.user, re.MULTILINE)
             text = json.dumps(

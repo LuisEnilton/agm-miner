@@ -497,12 +497,20 @@ poetry run agm rq1 consolidate       # rascunho do codebook a partir dos rótulo
 2. **`agm rq1 propose`** envia as seções em grupos de `rq1.propose_chunk_sections` (10). Para cada
    seção o modelo propõe de 1 a 3 rótulos com definição e diz se ela instrui o agente ou só descreve
    o projeto. Saída: `propose/<provedor>/<modelo>/proposals.parquet` e `proposals.json`.
-3. **`agm rq1 consolidate`** junta os rótulos (normalizados, com contagens e definições) e a
-   taxonomia de referência (`rq1.seed_codebook`) num rascunho: `consolidate/<provedor>/<modelo>/
-   codebook.draft.yaml`, com categorias, definições, critérios de inclusão e exclusão e
-   correspondência com o *Agent READMEs*, e `label_map.parquet`, que liga cada rótulo proposto a
-   uma categoria (ou a `other`). Ele recusa propostas de outra amostra e propostas que cobrem menos
-   de `rq1.min_proposal_coverage` da amostra (use `--partial` para aceitar).
+3. **`agm rq1 consolidate`** transforma os rótulos (normalizados, com contagens e definições) num
+   rascunho de codebook, em três etapas:
+   - **induzir:** o modelo agrupa os rótulos em `rq1.target_categories` categorias, com definição e
+     critérios de inclusão e exclusão, **sem ver** a taxonomia de referência. No piloto, quando a
+     referência aparecia junto com os rótulos, o modelo simplesmente a copiava;
+   - **alinhar:** numa requisição separada, cada categoria induzida é associada à categoria
+     correspondente do *Agent READMEs* (`rq1.seed_codebook`) ou marcada como nova;
+   - **mapear:** cada rótulo proposto é atribuído a uma categoria (ou a `other`), em lotes de
+     `rq1.map_chunk_labels`.
+
+   Saídas em `consolidate/<provedor>/<modelo>/`: `codebook.draft.yaml` (categorias, com a
+   correspondência na literatura) e `label_map.parquet` (rótulo → categoria). O comando recusa
+   propostas de outra amostra e propostas que cobrem menos de `rq1.min_proposal_coverage` da
+   amostra (use `--partial` para aceitar).
 4. **Curadoria (manual):** revise o rascunho (categorias redundantes, definições vagas, rótulos que
    caíram em `other`) e salve a versão final em `codebooks/rq1.yaml`, com um `version` próprio. É
    esse arquivo, versionado no repositório, que a classificação usa.
@@ -510,7 +518,7 @@ poetry run agm rq1 consolidate       # rascunho do codebook a partir dos rótulo
 Respostas que não seguem o formato pedido (seção faltando, sem rótulo, JSON inválido) não ficam no
 cache e são pedidas de novo na próxima execução. Depois de `rq1.max_attempts` falhas, o pedido é
 abandonado e aparece em `given_up` no manifesto, para não consumir a cota todo dia. Os prompts têm
-versão (`propose-v1`, `consolidate-v1`): mudar o texto de um prompt exige mudar a versão.
+versão (`propose-v2`, `induce-v1`, `align-v1`, `map-v1`): mudar o texto de um prompt exige mudar a versão.
 
 A saturação (`agm rq1 saturation`), a classificação (`classify`) e a validação (`validate`) vêm
 nos próximos PRs.

@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     def rq1_dir(self) -> Path:
         return self.data_dir / "rq1"
 
+    @property
+    def external_dir(self) -> Path:
+        """Datasets of other studies, imported in the analysis output format (``--gold``)."""
+        return self.data_dir / "external"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -99,6 +99,10 @@ def test_agreement_per_category_and_macro() -> None:
     assert len(result["macro_kappa_ci95"]) == 2
     docs = next(row for row in result["categories"] if row["category"] == "docs")
     assert docs["recall"] == 0.0 and docs["precision"] is None
+    # Micro: 3 labels each side, 2 shared (a and c: testing).
+    assert result["micro_precision"] == pytest.approx(2 / 3)
+    assert result["micro_recall"] == pytest.approx(2 / 3)
+    assert result["micro_f1"] == pytest.approx(2 / 3)
 
 
 # --------------------------------------------------------------------------- classify

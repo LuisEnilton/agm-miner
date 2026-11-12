@@ -21,6 +21,7 @@ from agm_miner.rq1.agentreadmes import (
     build_files,
     build_sections,
     import_agentreadmes,
+    labelled_artifact_ids,
     parse_gpt5_labels,
     parse_human_labels,
     score_agentreadmes,
@@ -342,3 +343,46 @@ def test_agentreadmes_commands(tmp_path: Path, monkeypatch) -> None:
 
     unscored = runner.invoke(app, ["rq1", "agentreadmes", "score", "--codebook", str(SEED)])
     assert unscored.exit_code == 1 and "agm rq1 classify" in unscored.output
+
+    # Classified with another model than study.yaml's: --model points the score at it.
+    gold = tmp_path / "data" / "external" / "agentreadmes"
+    config = Rq1Config(provider="openrouter", classify_model="fake-model")
+    output = tmp_path / "data" / "rq1" / "agentreadmes"
+    classify_sections(gold, output, config, HeadingBackend(), codebook_path=SEED)
+    scored = runner.invoke(
+        app,
+        [
+            "rq1",
+            "agentreadmes",
+            "score",
+            "--codebook",
+            str(SEED),
+            "--model",
+            "openrouter:fake-model",
+        ],
+    )
+    assert scored.exit_code == 0, scored.output
+    assert json.loads(scored.output[scored.output.index("{") :])["files"] == 5
+
+
+def test_classify_only_the_labelled_files_then_everything_from_the_cache(tmp_path: Path) -> None:
+    gold, output, config = imported(tmp_path)
+    labelled = labelled_artifact_ids(gold)
+    assert len(labelled) == 5  # z/missing is labelled but not in the dataset
+
+    first = HeadingBackend()
+    only_one = classify_sections(
+        gold, output, config, first, codebook_path=SEED, artifact_ids=labelled[:1]
+    )
+    assert only_one["files"] == 1 and only_one["only_files"] == 1
+    assert len(first.asked) == 1
+
+    everything = HeadingBackend()
+    summary = classify_sections(gold, output, config, everything, codebook_path=SEED)
+    assert summary["only_files"] is None and summary["files"] == 4  # d/four has no text
+    assert len(everything.asked) == summary["requests_planned"] - 1  # file 1 from the cache
+
+    without_labels = tmp_path / "plain"
+    import_agentreadmes(tmp_path / "train.parquet", without_labels)
+    with pytest.raises(FileNotFoundError, match="--human-labels"):
+        labelled_artifact_ids(without_labels)

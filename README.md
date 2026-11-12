@@ -492,6 +492,7 @@ pastas de saída, então os testes nunca se misturam com a coleta.
 ```bash
 poetry run agm rq1 models            # modelos do provedor configurado (--provider gemini|openrouter)
 poetry run agm rq1 smoke             # 1 requisição de teste: confere chave, modelo e schema
+                                     # (--phase propose|classify, --model provedor:modelo)
 poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
 poetry run agm rq1 propose           # rótulos livres para cada seção da amostra
 poetry run agm rq1 consolidate       # rascunho do codebook a partir dos rótulos propostos
@@ -618,11 +619,15 @@ cd -
 poetry run agm rq1 agentreadmes import data/sources/agentreadmes/train-00000-of-00001.parquet \
   --human-labels data/sources/agentreadmes/final_am_classification_3.csv \
   --gpt5-labels data/sources/agentreadmes/gpt_5_file_classifications.csv
-# 2. Classifica com o codebook do artigo (qualquer comando agm rq1 aceita --gold)
-poetry run agm rq1 classify --gold data/external/agentreadmes --codebook codebooks/seed_agent_readmes.yaml
+# 2. Classifica com o codebook do artigo (qualquer comando agm rq1 aceita --gold). --only-labelled
+#    classifica só os 324 arquivos rotulados (cerca de 1/7 das seções), que é o que o score usa;
+#    --limit 5 antes faz um piloto para conferir o custo
+poetry run agm rq1 classify --gold data/external/agentreadmes \
+  --codebook codebooks/seed_agent_readmes.yaml --only-labelled --model anthropic:claude-sonnet-5-5
 # 3. Concordância por arquivo: humano × nosso classificador, humano × GPT-5, GPT-5 × nosso
-poetry run agm rq1 agentreadmes score
-poetry run agm rq1 agentreadmes score --tool CLAUDE --tool AGENTS   # só as ferramentas do estudo
+poetry run agm rq1 agentreadmes score --model anthropic:claude-sonnet-5-5
+poetry run agm rq1 agentreadmes score --model anthropic:claude-sonnet-5-5 \
+  --tool CLAUDE --tool AGENTS   # só as ferramentas do estudo
 ```
 
 - **O que a importação grava** (`data/external/agentreadmes/`): `rq1_sections.parquet`, com os
@@ -635,6 +640,10 @@ poetry run agm rq1 agentreadmes score --tool CLAUDE --tool AGENTS   # só as fer
   arquivo recebe todas as categorias das suas seções (`other` não conta). Essa união tende a
   marcar mais categorias que um humano lendo o arquivo inteiro (mais revocação, menos precisão).
   Um arquivo sem nenhuma seção com texto fica sem categoria.
+- **`--only-labelled`** filtra só a classificação; a importação continua com tudo. As requisições
+  são montadas por arquivo, então classificar o dataset inteiro depois reaproveita do cache quase
+  todas as respostas já pagas (só muda a requisição de um arquivo rotulado que tem seção idêntica
+  à de um arquivo não rotulado, que passa a representá-la).
 - **Arquivos ficam de fora da comparação** quando não estão no dataset (8 dos 332 rotulados) ou
   quando a classificação não terminou (`unclassified_files`, por exemplo depois de um
   `classify --limit`). As três comparações usam sempre o mesmo conjunto de arquivos.

@@ -344,6 +344,21 @@ def import_agentreadmes(
 # --------------------------------------------------------------------------- score
 
 
+def labelled_artifact_ids(gold_dir: Path) -> list[int]:
+    """Files of an imported dataset that have human reference labels (``agm rq1 classify
+    --only-labelled`` classifies just these, which is all the score needs)."""
+    path = gold_dir / REFERENCE_LABELS
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No {REFERENCE_LABELS} in {gold_dir}: --only-labelled needs a dataset imported "
+            "with its reference labels (agm rq1 agentreadmes import --human-labels)"
+        )
+    reference = pl.read_parquet(path).filter(
+        (pl.col("rater") == HUMAN) & pl.col("artifact_id").is_not_null()
+    )
+    return sorted(reference["artifact_id"].unique().to_list())
+
+
 def predicted_file_labels(section_labels: pl.DataFrame) -> dict[int, frozenset[str]]:
     """A file has every category one of its sections has (``other`` is not a category)."""
     return {

@@ -634,6 +634,10 @@ def rq1_smoke(
     phase: Annotated[
         str, typer.Option(help="Which phase's model to try: propose, consolidate or classify.")
     ] = "classify",
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="Try this model for the phase instead, as provider:model."),
+    ] = None,
     study_path: StudyOption = None,
 ) -> None:
     """One tiny request to the configured provider: checks the key, the model and that it
@@ -643,6 +647,7 @@ def rq1_smoke(
     if phase not in ("propose", "consolidate", "classify"):
         raise typer.BadParameter("phase must be propose, consolidate or classify")
     settings, study = _context(study_path)
+    study = _with_model(study, model, phase)
     backend = make_backend(settings, study.rq1, phase)
     result = backend.complete(
         PromptRequest(
@@ -687,12 +692,13 @@ ModelOption = Annotated[
 ]
 
 
-def _with_classifier(study: StudyConfig, model: str | None) -> StudyConfig:
-    """``study`` with the ``--model`` classifier (recorded in every manifest's rq1_config)."""
+def _with_model(study: StudyConfig, model: str | None, phase: str = "classify") -> StudyConfig:
+    """``study`` with the ``--model`` model for ``phase`` (recorded in every manifest's
+    rq1_config)."""
     if model is None:
         return study
     try:
-        return study.model_copy(update={"rq1": study.rq1.with_classifier(model)})
+        return study.model_copy(update={"rq1": study.rq1.with_model(model, phase)})
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--model") from exc
 
@@ -710,7 +716,7 @@ def _rq1_backend_run(
     from agm_miner.rq1.backends import make_backend
 
     settings, study = _context(study_path)
-    study = _with_classifier(study, model)
+    study = _with_model(study, model)
     gold_dir, output_dir = _rq1_dirs(settings, gold)
     backend = make_backend(settings, study.rq1, phase)
     with publishing(Progress(stage)) as progress, _showing_progress():
@@ -726,11 +732,19 @@ def rq1_classify(
     limit: Annotated[
         int | None, typer.Option(min=1, help="Send at most N requests (a pilot run).")
     ] = None,
+    only_labelled: Annotated[
+        bool,
+        typer.Option(
+            help="Only the files with reference labels in --gold (an imported dataset such "
+            "as Agent READMEs): what `agentreadmes score` needs, for a fraction of the cost."
+        ),
+    ] = False,
     model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """Categories of every section with text (rq1.classify_model), file by file. Cached and
     resumable: run it again after an interruption or a daily limit."""
+    from agm_miner.rq1.agentreadmes import labelled_artifact_ids
     from agm_miner.rq1.stages import classify_sections
 
     _rq1_backend_run(
@@ -745,6 +759,7 @@ def rq1_classify(
             backend,
             codebook_path=codebook or study.rq1.codebook,
             limit=limit,
+            artifact_ids=labelled_artifact_ids(gold_dir) if only_labelled else None,
             progress=progress,
         ),
         model,
@@ -856,7 +871,7 @@ def rq1_validate_score(
     from agm_miner.rq1.stages import score_validation
 
     settings, study = _context(study_path)
-    study = _with_classifier(study, model)
+    study = _with_model(study, model)
     _, output_dir = _rq1_dirs(settings, gold)
     _print(
         score_validation(
@@ -898,7 +913,7 @@ def rq1_compare(
     settings, study = _context(study_path)
     models = []
     for spec in model:
-        rq1 = _with_classifier(study, spec).rq1
+        rq1 = _with_model(study, spec).rq1
         models.append((rq1.provider, rq1.classify_model))
     if models[0] == models[1]:
         raise typer.BadParameter("the two models must differ", param_hint="--model")
@@ -963,13 +978,15 @@ def rq1_agentreadmes_score(
         list[str] | None,
         typer.Option("--tool", help="Score only this tool (CLAUDE, AGENTS, COPILOT); repeatable."),
     ] = None,
+    model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """File-level agreement of the classification with the paper's human labels, next to GPT-5,
-    overall and per tool (model: rq1.provider and rq1.classify_model)."""
+    overall and per tool (model: --model, or rq1.provider and rq1.classify_model)."""
     from agm_miner.rq1.agentreadmes import score_agentreadmes
 
     settings, study = _context(study_path)
+    study = _with_model(study, model)
     gold_dir, output_dir = _rq1_dirs(settings, gold or settings.external_dir / "agentreadmes")
     _print(
         score_agentreadmes(

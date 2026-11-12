@@ -682,6 +682,10 @@ criados durante o teste. O CI (GitHub Actions) roda lint e testes em cada PR.
   ou repita a seleção com `created_before: 2024-01-01`.
 - A linguagem principal vem do GitHub Linguist, que não conta Markdown. Um repositório de
   documentação com um script pequeno ainda passa.
-- A legibilidade (Flesch) só é calculada para textos em inglês.
+- A legibilidade (Flesch) só é calculada para textos em inglês, e só sobre parágrafos e itens de
+  lista (títulos, tabelas e código ficam de fora). Cada bloco conta como uma frase, mesmo sem
+  ponto final, porque os arquivos de configuração são escritos quase sempre em listas. Blocos de
+  1 ou 2 palavras (rótulos, links) ficam de fora. Blocos feitos só de caminhos ou URLs ainda
+  distorcem o índice.
 
 Mais detalhes técnicos estão em [AGENTS.md](AGENTS.md).

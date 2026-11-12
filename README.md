@@ -630,6 +630,20 @@ poetry run agm rq1 agentreadmes score --model anthropic:claude-sonnet-5-5 \
   --tool CLAUDE --tool AGENTS   # só as ferramentas do estudo
 ```
 
+**Sensibilidade ao codebook.** O `seed_agent_readmes.yaml` tem só as definições de uma linha da
+Tabela 3 do artigo. O `codebooks/agent_readmes_enriched.yaml` mantém as mesmas categorias e
+definições e acrescenta, como critério de inclusão, só textos dos próprios autores: a definição
+operacional do código deles (`labels.py`) e a descrição de cada categoria no artigo, com o exemplo
+que ela traz. Rodar os dois mostra quanto do erro vem das definições. As saídas ficam em pastas
+separadas (`agent_readmes_2025` e `agent_readmes_2025-enriched`).
+
+```bash
+poetry run agm rq1 classify --gold data/external/agentreadmes \
+  --codebook codebooks/agent_readmes_enriched.yaml --only-labelled --model anthropic:claude-sonnet-5-5
+poetry run agm rq1 agentreadmes score --codebook codebooks/agent_readmes_enriched.yaml \
+  --model anthropic:claude-sonnet-5-5
+```
+
 - **O que a importação grava** (`data/external/agentreadmes/`): `rq1_sections.parquet`, com os
   arquivos quebrados em seções pelo mesmo parser do `analyze`; `files.parquet`, com URL e
   metadados de cada arquivo; `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos

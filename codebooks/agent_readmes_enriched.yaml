@@ -1,0 +1,173 @@
+# The taxonomy of Chatlatanagulchai et al. (2025), "Agent READMEs" (arXiv:2511.12884), with the
+# descriptions its authors wrote, for the sensitivity run of the external validation
+# (agm rq1 classify --gold data/external/agentreadmes --codebook <this file>).
+#
+# Same ids, names and groups as seed_agent_readmes.yaml, so `agm rq1 agentreadmes score` reads the
+# same reference labels. Each `definition` is the Table 3 one (as in the seed); each `include`
+# adds only the authors' own words, from their replication package
+# (woraamy/Agent-Context-File-Analysis, commit 77b16a9):
+#   - "Operational definition": LABEL_DEFINITIONS in manifest_analysis/classification/labels.py;
+#   - "In the paper" and "Paper's example": the description of the category in the paper's text
+#     (manifest_analysis/classification/label_examples.txt), LaTeX removed and the example cut to
+#     the sentence that says what it shows.
+# Nothing here is ours: no exclusion criteria are given because the paper states none.
+name: agent_readmes
+version: "2025-enriched"
+description: "Agent READMEs, with the authors' descriptions of each category"
+source: >-
+  Chatlatanagulchai et al. 2025, arXiv:2511.12884: Table 3 definitions, plus labels.py and the
+  category descriptions of the paper (replication package, commit 77b16a9)
+categories:
+  - id: system_overview
+    name: System Overview
+    group: General
+    definition: General project overview or key features.
+    include: >-
+      In the paper: these instructions provide a general project or system overview and describe
+      key features. Operational definition: overview of the system, features of the system.
+      Paper's example: a section that describes the project's identity, mechanism, and
+      functionality.
+  - id: ai_integration
+    name: AI Integration
+    group: General
+    definition: Desired behavior and roles for the agent, and how to integrate other AI tools.
+    include: >-
+      In the paper: this instruction type contains notes for integrating with or interacting with
+      agentic coding tools. Operational definition: specific aspects related to integrating or
+      interacting with AI agents; can be notes, roles or reminders given to the AI agent. Paper's
+      example: a section that gives the agent a specific role and expertise (an expert in React,
+      Next.js and content management for the project's website).
+  - id: documentation
+    name: Documentation
+    group: General
+    definition: Supplementary documents, links, or references.
+    include: >-
+      In the paper: this instruction type lists supplementary documents, links, or references for
+      additional context. Operational definition: documents and references for AI agents. Paper's
+      examples: documentation requirements (inline comments for non-obvious code, JSDoc for public
+      APIs, usage examples), and instructions to update the agent instruction file itself whenever
+      the agent learns new project information that future tasks might need.
+  - id: architecture
+    name: Architecture
+    group: Implementation
+    definition: High-level structure, design principles, or key components.
+    include: >-
+      In the paper: this instruction type describes the high-level structure, design principles,
+      or key components of the system's architecture. Operational definition: high-level
+      structure, organization, and design principle; can be project structure or key components.
+      Paper's example: a workspace with several packages and the role of each, and where business
+      logic and UI components must reside.
+  - id: implementation_details
+    name: Implementation Details
+    group: Implementation
+    definition: Specifics for implementing code or components, including coding style.
+    include: >-
+      In the paper: this instruction type provides specific details for implementing code or
+      system components, including coding style guidelines. Operational definition: details of how
+      to implement a part of the code or system, code styles, piece of code. Paper's example: code
+      style guidelines (simple, explicit, typed code), constraints on characters, docstring format,
+      imports and decorators, and naming conventions.
+  - id: build_and_run
+    name: Build and Run
+    group: Build
+    definition: Compiling, running, and key commands.
+    include: >-
+      In the paper: this instruction type outlines the process for compiling source code and
+      running the application, often including key commands. Operational definition: processes of
+      compiling the code, commands to build and run the system. Paper's example: npm commands for
+      the development server and for production builds.
+  - id: testing
+    name: Testing
+    group: Build
+    definition: Procedures and commands for automated tests.
+    include: >-
+      In the paper: this instruction type details the procedures and commands for executing
+      automated tests. Operational definition: processes of running tests, adding tests, creating
+      tests, and the commands used for running tests. Paper's example: guidelines for writing tests
+      through user interactions, commands for running the test suites, and warnings about
+      environment-specific failures.
+  - id: configuration_environment
+    name: Configuration & Environment
+    group: Build
+    definition: Setting up the development or production environment.
+    include: >-
+      In the paper: this instruction type provides instructions for configuring the system and
+      setting up the development or production environment. Operational definition: settings and
+      parameters for making the system work. Paper's example: commands for environment setup (git
+      configuration, creating and activating a virtual environment, installing development
+      dependencies).
+  - id: devops
+    name: DevOps
+    group: Build
+    definition: Deployment, release, and operations such as CI/CD.
+    include: >-
+      In the paper: this instruction type covers procedures for software deployment, release, and
+      operations, such as CI/CD pipelines. Operational definition: the processes of releasing
+      software and managing it in a production environment; CI/CD. Paper's example: the CI
+      pipeline and the checks it runs (build, tests, formatting, lint).
+  - id: development_process
+    name: Development Process
+    group: Management
+    definition: Workflow, including version control guidelines such as Git.
+    include: >-
+      In the paper: this kind of instruction defines the development workflow, including
+      guidelines for version control systems like Git. Operational definition: details related to
+      how to properly use Git in a development environment and how to review. Paper's example:
+      commit and pull request guidelines (commit message style, checks to run before pushing,
+      requirements for pull requests).
+  - id: project_management
+    name: Project Management
+    group: Management
+    definition: Planning, organization, and management of the project.
+    include: >-
+      In the paper: this kind of instruction relates to the planning, organization, and management
+      of the project. Operational definition: planning and organization of the project. Paper's
+      example: guidance on the project backlog of future improvements, its format, and how to use
+      it to understand context and priorities.
+  - id: maintenance
+    name: Maintenance
+    group: Quality
+    definition: Improving readability and detecting or resolving bugs.
+    include: >-
+      In the paper: this kind of instruction provides guidelines for system maintenance, including
+      strategies for improving readability, detecting and resolving bugs. Operational definition:
+      the ease with which a software system can be modified, corrected, or enhanced over time.
+      Paper's example: principles for keeping public interfaces stable (preserving function
+      signatures, argument positions and names of exported methods) and checks required before
+      changing public APIs.
+  - id: debugging
+    name: Debugging
+    group: Quality
+    definition: Error handling and identifying or resolving issues.
+    include: >-
+      In the paper: a category added during the analysis because many cases could not be
+      categorized into the existing labels. Operational definition: error handling and ways to
+      debug errors and problems. Paper's example: debugging tips (verbose output flags, where to
+      find the error log, enabling stack traces, profiling).
+  - id: performance
+    name: Performance
+    group: Quality
+    definition: System performance, quality assurance, and optimization.
+    include: >-
+      In the paper: this kind of instruction focuses on system performance, quality assurance, and
+      potential optimizations. Operational definition: details about the performance of the system,
+      how to improve it, and how to do quality assurance. Paper's example: performance guidelines
+      saying when automatic compiler optimizations suffice and when manual optimization is needed.
+  - id: security
+    name: Security
+    group: Quality
+    definition: Security considerations, vulnerabilities, and best practices.
+    include: >-
+      In the paper: this kind of instruction addresses security considerations, vulnerabilities, or
+      best practices for the system. Operational definition: security aspect of the system. Paper's
+      example: the security architecture and permission system (workspace isolation, default
+      protection against unauthorized access, service visibility levels).
+  - id: ui_ux
+    name: UI/UX
+    group: Quality
+    definition: User interface and user experience guidelines.
+    include: >-
+      In the paper: this kind of instruction contains guidelines or details concerning the user
+      interface (UI) and user experience (UX). Operational definition: details related to the user
+      interface. Paper's example: user experience standards (automatic background data loading,
+      subtle notifications, progressive loading).

@@ -389,3 +389,13 @@ def test_classify_only_the_labelled_files_then_everything_from_the_cache(tmp_pat
     import_agentreadmes(tmp_path / "train.parquet", without_labels)
     with pytest.raises(FileNotFoundError, match="--human-labels"):
         labelled_artifact_ids(without_labels)
+
+
+def test_enriched_codebook_keeps_the_seed_categories() -> None:
+    seed = load_codebook(SEED)
+    enriched = load_codebook(SEED.with_name("agent_readmes_enriched.yaml"))
+    assert enriched.label != seed.label  # its classification lands in another folder
+    as_seed = [(c.id, c.name, c.group, c.definition) for c in seed.categories]
+    assert [(c.id, c.name, c.group, c.definition) for c in enriched.categories] == as_seed
+    assert all(c.include.startswith("In the paper:") for c in enriched.categories)
+    assert all("Operational definition:" in c.include for c in enriched.categories)

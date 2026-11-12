@@ -620,7 +620,7 @@ poetry run agm rq1 agentreadmes import data/sources/agentreadmes/train-00000-of-
   --human-labels data/sources/agentreadmes/final_am_classification_3.csv \
   --gpt5-labels data/sources/agentreadmes/gpt_5_file_classifications.csv
 # 2. Classifica com o codebook do artigo (qualquer comando agm rq1 aceita --gold). --only-labelled
-#    classifica só os 324 arquivos rotulados (cerca de 1/7 das seções), que é o que o score usa;
+#    classifica só os 325 arquivos rotulados (cerca de 1/7 das seções), que é o que o score usa;
 #    --limit 5 antes faz um piloto para conferir o custo
 poetry run agm rq1 classify --gold data/external/agentreadmes \
   --codebook codebooks/seed_agent_readmes.yaml --only-labelled --model anthropic:claude-sonnet-5-5
@@ -644,11 +644,11 @@ poetry run agm rq1 agentreadmes score --model anthropic:claude-sonnet-5-5 \
   são montadas por arquivo, então classificar o dataset inteiro depois reaproveita do cache quase
   todas as respostas já pagas (só muda a requisição de um arquivo rotulado que tem seção idêntica
   à de um arquivo não rotulado, que passa a representá-la).
-- **Arquivos ficam de fora da comparação** quando não estão no dataset (8 dos 332 rotulados) ou
+- **Arquivos ficam de fora da comparação** quando não estão no dataset (7 dos 332 rotulados) ou
   quando a classificação não terminou (`unclassified_files`, por exemplo depois de um
   `classify --limit`). As três comparações usam sempre o mesmo conjunto de arquivos.
 - **O `copilot-instructions.md` é importado** (ferramenta `COPILOT`), porque a validação mede o
-  classificador e independe da ferramenta: tirá-lo deixaria 202 arquivos rotulados em vez de 324 e
+  classificador e independe da ferramenta: tirá-lo deixaria 202 arquivos rotulados em vez de 325 e
   as categorias raras quase sem exemplos. O resultado sai também por ferramenta, e `--tool`
   restringe o score às ferramentas do estudo, para comparar com o nosso corpus.
 - **Conferência da correspondência dos rótulos:** com os 332 arquivos, o `agreement` deste projeto

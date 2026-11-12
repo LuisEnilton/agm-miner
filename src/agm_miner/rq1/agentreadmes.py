@@ -136,7 +136,8 @@ def build_files(dataset: pl.DataFrame) -> pl.DataFrame:
 
     files = (
         dataset.with_columns(
-            (pl.col("repository_owner") + "/" + pl.col("repository_name")).alias("full_name")
+            (pl.col("repository_owner") + "/" + pl.col("repository_name")).alias("full_name"),
+            pl.col("file_url").str.strip_chars(),
         )
         .sort("file_url")
         .with_row_index("artifact_id", offset=1)
@@ -193,7 +194,9 @@ def parse_human_labels(frame: pl.DataFrame) -> dict[str, tuple[str, list[str]]]:
     labels: dict[str, tuple[str, list[str]]] = {}
     for row in frame.iter_rows(named=True):
         values = [str(row[c]).strip() for c in columns if row[c] and str(row[c]).strip()]
-        labels[str(row["#"])] = (row["file_url"], _map_labels(values, HUMAN_LABELS, "human"))
+        # URLs are matched with the dataset's; one in the published CSV has a leading space.
+        url = (row["file_url"] or "").strip()
+        labels[str(row["#"])] = (url, _map_labels(values, HUMAN_LABELS, "human"))
     return labels
 
 

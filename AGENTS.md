@@ -178,8 +178,9 @@ falha se a migração divergir dos modelos.
 - A chave do cache (`store.request_key`) precisa cobrir tudo o que determina a resposta (fase,
   provedor, modelo, versão do prompt, hash do codebook, `section_key`). Ao mudar um prompt, mude a
   versão.
-- Dois classificadores: `--model provedor:modelo` (`Rq1Config.with_classifier`) troca provedor e
-  `classify_model` numa execução de `classify`, `saturation` e `validate llm/score`. Tudo o que um
+- Dois classificadores: `--model provedor:modelo` (`Rq1Config.with_model`) troca provedor e
+  `classify_model` numa execução de `classify`, `saturation`, `validate llm/score` e
+  `agentreadmes score` (no `smoke`, o modelo da fase de `--phase`). Tudo o que um
   modelo gera fica em pastas por provedor/modelo (o score de validação inclusive), e
   `stages.compare_models` compara dois modelos na amostra de validação e em todas as seções.
 - Validação externa (`rq1/agentreadmes.py`): `agm rq1 agentreadmes import` grava o dataset do
@@ -188,7 +189,8 @@ falha se a migração divergir dos modelos.
   `--gold`. Os rótulos do artigo são mapeados por tabela explícita para o
   `seed_agent_readmes.yaml`; um rótulo desconhecido faz a importação falhar. O `score` agrega as
   categorias das seções por arquivo e compara com os rótulos humanos, com o GPT-5 como linha de
-  base. Nada é filtrado na importação (o `COPILOT` fica); `--tool` filtra no score.
+  base. Nada é filtrado na importação (o `COPILOT` fica); `--tool` filtra no score e
+  `classify --only-labelled` classifica só os arquivos com rótulos de referência.
 - Modelos, effort e tamanhos de amostra ficam em `rq1:` no `study.yaml`; o codebook curado fica em
   `codebooks/` (versionado). Testes usam SDKs/clientes falsos, nunca a API real.
 

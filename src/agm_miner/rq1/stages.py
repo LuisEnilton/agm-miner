@@ -22,7 +22,7 @@ import json
 import os
 import re
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -720,12 +720,22 @@ def classify_sections(
     *,
     codebook_path: Path,
     limit: int | None = None,
+    artifact_ids: Collection[int] | None = None,
     progress: Progress | None = None,
 ) -> dict[str, Any]:
-    """Categories of every section with text, sent file by file (``limit`` requests at most)."""
+    """Categories of every section with text, sent file by file (``limit`` requests at most;
+    only the files in ``artifact_ids``, when given). Requests are built per file, so a later
+    run over more files reuses the answers already cached."""
     with run_lock(output_dir):
         return _classify_sections(
-            gold_dir, output_dir, config, backend, codebook_path, limit, progress or Progress()
+            gold_dir,
+            output_dir,
+            config,
+            backend,
+            codebook_path,
+            limit,
+            artifact_ids,
+            progress or Progress(),
         )
 
 
@@ -736,10 +746,13 @@ def _classify_sections(
     backend: LLMBackend,
     codebook_path: Path,
     limit: int | None,
+    artifact_ids: Collection[int] | None,
     progress: Progress,
 ) -> dict[str, Any]:
     codebook = load_codebook(codebook_path)
     units = load_units(gold_dir)
+    if artifact_ids is not None:
+        units = units.filter(pl.col("artifact_id").is_in(list(artifact_ids)))
     distinct = distinct_units(units)
     chunks = file_chunks(distinct, config.chunk_sections)
     selected = chunks if limit is None else chunks[:limit]
@@ -770,6 +783,8 @@ def _classify_sections(
         },
         "sections": units.height,
         "distinct_sections": distinct.height,
+        "files": units["artifact_id"].n_unique(),
+        "only_files": None if artifact_ids is None else len(set(artifact_ids)),
         "requests_planned": len(chunks),
         "limit": limit,
         "distinct_sections_labelled": labelled,

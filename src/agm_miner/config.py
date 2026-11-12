@@ -322,15 +322,15 @@ class Rq1Config(_StrictModel):
         """(model, effort) of a phase: propose, consolidate or classify."""
         return getattr(self, f"{phase}_model"), getattr(self, f"{phase}_effort")
 
-    def with_classifier(self, spec: str) -> Rq1Config:
-        """This configuration with another classifier, given as ``provider:model`` (e.g.
-        ``gemini:gemini-3.5-flash-lite`` or ``openrouter:nvidia/x:free``), to classify with a
-        second model without another study file."""
+    def with_model(self, spec: str, phase: str = "classify") -> Rq1Config:
+        """This configuration with another model for ``phase``, given as ``provider:model``
+        (e.g. ``gemini:gemini-3.5-flash-lite`` or ``openrouter:nvidia/x:free``), to run a
+        command with a second model without another study file."""
         provider, separator, model = spec.partition(":")
         if not separator or not model:
             raise ValueError(f"expected provider:model, got {spec!r}")
         return Rq1Config.model_validate(
-            self.model_dump() | {"provider": provider, "classify_model": model}
+            self.model_dump() | {"provider": provider, f"{phase}_model": model}
         )
 
 

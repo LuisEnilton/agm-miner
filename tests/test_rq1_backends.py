@@ -332,3 +332,26 @@ def test_smoke_command(monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     summary = json.loads(result.output[result.output.index("{") :])
     assert summary["schema_ok"] is True and summary["model"] == "nvidia/model:free"
+
+
+def test_smoke_command_tries_another_model_for_the_phase(monkeypatch) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def fake_backend(settings, config, phase):
+        seen.append((config.provider, config.model_for(phase)[0]))
+
+        class Echo:
+            provider, model = config.provider, config.model_for(phase)[0]
+
+            def complete(self, request: PromptRequest) -> LLMResult:
+                return LLMResult("smoke", "succeeded", text='{"ok": true, "echo": "agm"}')
+
+        return Echo()
+
+    monkeypatch.setattr(backends_module, "make_backend", fake_backend)
+    args = ["rq1", "smoke", "--phase", "propose", "--model", "anthropic:claude-opus-5-5"]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert seen == [("anthropic", "claude-opus-5-5")]
+    bad = CliRunner().invoke(app, ["rq1", "smoke", "--model", "opus"])
+    assert bad.exit_code == 2 and "provider:model" in bad.output

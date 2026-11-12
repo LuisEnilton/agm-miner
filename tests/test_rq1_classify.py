@@ -14,8 +14,10 @@ from agm_miner.rq1.codebook import Codebook, dump_codebook
 from agm_miner.rq1.prompts import InvalidAnswer, classify_system, parse_classification, short_ids
 from agm_miner.rq1.stages import (
     InvalidSheetError,
+    NothingToCompareError,
     ValidationSheetExistsError,
     classify_sections,
+    compare_models,
     distinct_units,
     export_validation,
     file_chunks,
@@ -27,6 +29,22 @@ from agm_miner.rq1.stages import (
 from agm_miner.rq1.units import build_units
 from tests.test_rq1_foundations import sections
 from tests.test_rq1_labels import FakeBackend, setup
+
+
+class OtherBackend(FakeBackend):
+    """A second classifier: like FakeBackend, but every section is "testing"."""
+
+    model = "other-model"
+
+    def answer(self, request):
+        result = super().answer(request)
+        if request.schema_name != "classification":
+            return result
+        answer = json.loads(result.text)
+        for section in answer["sections"]:
+            section["categories"] = ["testing"]
+        return type(result)(result.custom_id, "succeeded", text=json.dumps(answer), usage={})
+
 
 CODEBOOK = Codebook(
     name="rq1",
@@ -219,6 +237,9 @@ def test_validation_end_to_end(tmp_path: Path) -> None:
     assert scores["llm_stability"]["sections"] == 20
     report = (Path(scores["output"]).parent / "scores.md").read_text()
     assert "## Human × LLM" in report and "| testing |" in report
+    # Scores live next to the model's labels: another model's scores never overwrite them.
+    assert Path(scores["output"]).parent == Path(first["output"]).parent
+    assert Path(scores["output"]).parent.parts[-2:] == ("openrouter", "fake-model")
 
     # Before any hand label, the stability alone can be measured.
     stability = score_validation(
@@ -236,3 +257,78 @@ def test_validation_end_to_end(tmp_path: Path) -> None:
             provider="openrouter",
             model="fake-model",
         )
+
+
+# --------------------------------------------------------------------------- model comparison
+
+
+def test_compare_two_models_on_the_sample_and_every_section(tmp_path: Path) -> None:
+    gold, output, config = setup(tmp_path, classify_model="fake-model")
+    codebook = codebook_file(tmp_path)
+    models = [("openrouter", "fake-model"), ("openrouter", "other-model")]
+    with pytest.raises(NothingToCompareError, match="validate llm --model"):
+        compare_models(output, codebook_path=codebook, models=models)
+
+    sheet = Path(export_validation(gold, output, config, codebook_path=codebook, size=20)["sheet"])
+    first = validation_llm(gold, output, config, FakeBackend(), codebook_path=codebook)
+    validation_llm(gold, output, config, OtherBackend(), codebook_path=codebook)
+    # The human agrees with model A everywhere.
+    by_key = dict(pl.read_parquet(Path(first["output"])).iter_rows())
+    keys = [row["section_key"] for row in csv.DictReader(sheet.open(encoding="utf-8"))]
+    filled = fill_sheet(sheet, lambda i: by_key[keys[i]])
+
+    sample_only = compare_models(output, codebook_path=codebook, models=models, human=filled)
+    assert "all_sections" not in sample_only
+    validation = sample_only["validation"]
+    assert validation["human_vs_a"]["exact_match"] == 1.0
+    assert validation["human_vs_b"]["exact_match"] == pytest.approx(0.5)
+    assert validation["a_vs_b"]["exact_match"] == pytest.approx(0.5)
+
+    classify_sections(gold, output, config, FakeBackend(), codebook_path=codebook)
+    classify_sections(gold, output, config, OtherBackend(), codebook_path=codebook)
+    result = compare_models(output, codebook_path=codebook, models=models, human=filled)
+    every = result["all_sections"]["a_vs_b"]
+    assert every["sections"] == 80 and every["exact_match"] == pytest.approx(0.5)
+    assert every["macro_kappa_ci95"] is None  # no bootstrap over every section
+
+    directory = Path(result["output"]).parent
+    assert directory.name == "openrouter_fake-model__vs__openrouter_other-model"
+    prevalence = pl.read_parquet(directory / "prevalence.parquet")
+    docs = prevalence.filter(pl.col("category") == "docs").row(0, named=True)
+    assert docs["file_share_a"] > 0 and docs["file_share_b"] == 0.0
+    assert docs["file_share_diff"] == -docs["file_share_a"]
+    report = (directory / "compare.md").read_text()
+    assert "## Human × B (openrouter:other-model)" in report
+    assert "# Every section" in report and "| docs |" in report
+
+    with pytest.raises(ValueError, match="two different"):
+        compare_models(output, codebook_path=codebook, models=[models[0], models[0]])
+
+
+def test_compare_and_model_options_on_the_command_line(tmp_path: Path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from agm_miner.cli import app
+
+    gold, output, config = setup(tmp_path, classify_model="fake-model")
+    codebook = codebook_file(tmp_path)
+    export_validation(gold, output, config, codebook_path=codebook, size=20)
+    validation_llm(gold, output, config, FakeBackend(), codebook_path=codebook)
+    validation_llm(gold, output, config, OtherBackend(), codebook_path=codebook)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    runner = CliRunner()
+
+    args = ["rq1", "compare", "--codebook", str(codebook)]
+    two = ["--model", "openrouter:fake-model", "--model", "openrouter:other-model"]
+    result = runner.invoke(app, [*args, *two])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.output[result.output.index("{") :])
+    assert summary["model_b"] == "openrouter:other-model"
+    assert summary["validation"]["a_vs_b"]["sections"] == 20
+
+    one = runner.invoke(app, [*args, "--model", "openrouter:fake-model"])
+    assert one.exit_code == 2 and "exactly two" in one.output
+    bad = runner.invoke(app, ["rq1", "classify", "--model", "sonnet"])
+    assert bad.exit_code == 2 and "provider:model" in bad.output
+    none = runner.invoke(app, [*args, "--model", "gemini:a", "--model", "gemini:b"])
+    assert none.exit_code == 1 and "classify --model" in none.output

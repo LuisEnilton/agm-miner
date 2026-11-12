@@ -41,3 +41,14 @@ def test_fingerprint_is_stable_and_sensitive() -> None:
     assert base.fingerprint() == StudyConfig().fingerprint()
     changed = StudyConfig.model_validate({"selection": {"min_stars": 51}})
     assert changed.fingerprint() != base.fingerprint()
+
+
+def test_with_classifier_swaps_provider_and_classify_model() -> None:
+    rq1 = StudyConfig().rq1
+    other = rq1.with_classifier("openrouter:nvidia/nemotron-3.5-super-vl:free")
+    assert other.provider == "openrouter"
+    assert other.classify_model == "nvidia/nemotron-3.5-super-vl:free"  # colons kept
+    assert other.propose_model == rq1.propose_model and other.codebook == rq1.codebook
+    for bad in ("claude-sonnet-5-5", "gemini:", "mistral:large"):
+        with pytest.raises(ValueError):
+            rq1.with_classifier(bad)

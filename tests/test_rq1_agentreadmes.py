@@ -164,6 +164,9 @@ def test_reference_labels_map_onto_the_seed_codebook() -> None:
         "1": ("u1", ["ai_integration", "maintenance"]),
         "2": ("u2", []),
     }
+    # The published CSV has a URL with a leading space: it must still match the dataset.
+    spaced = frame.with_columns(pl.Series("file_url", [" u1", "u2 "]))
+    assert [url for url, _ in parse_human_labels(spaced).values()] == ["u1", "u2"]
     with pytest.raises(AgentReadmesError, match="unknown human labels"):
         parse_human_labels(frame.with_columns(pl.lit("Vibes").alias("Label1")))
 

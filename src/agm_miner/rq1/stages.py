@@ -9,6 +9,7 @@ Layout of that directory::
     classify/<codebook>/<provider>/<model>/       section, artifact and repository labels
     saturation/<codebook>/<provider>/<model>/     classification of a fresh sample
     validation/<codebook>/                        blind sheet, LLM replicates, agreement scores
+    agentreadmes/<codebook>/<provider>/<model>/   file-level scores on the Agent READMEs dataset
     cache/, batches.json, failures.json           LLM answers, pending batches, failed requests
 """
 

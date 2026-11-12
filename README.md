@@ -561,6 +561,60 @@ versão (`propose-v2`, `induce-v1`, `align-v1`, `map-v1`): mudar o texto de um p
      planilha depois de alguns dias). Sem `--human`, mede só a estabilidade. Saídas:
      `scores.json` e `scores.md`.
 
+### Validação externa com o dataset do *Agent READMEs*
+
+O *Agent READMEs* (Chatlatanagulchai et al., 2025) publicou 2.303 arquivos de contexto
+(922 `CLAUDE.md`, 694 `AGENTS.md` e 687 `copilot-instructions.md`) e, no pacote de replicação,
+os rótulos que os autores deram à mão a 332 deles, com as 16 categorias do artigo, junto com os
+rótulos do GPT-5 para os mesmos arquivos. Classificar esses arquivos com o nosso método e o
+codebook deles (`codebooks/seed_agent_readmes.yaml`) mede o classificador contra rótulos humanos
+que não são nossos, com o GPT-5 do artigo como linha de base.
+
+```bash
+# Fontes, fixadas nas revisões usadas (Hugging Face e GitHub)
+mkdir -p data/sources/agentreadmes && cd data/sources/agentreadmes
+curl -LO https://huggingface.co/datasets/hao-li/AgentREADMEs/resolve/e5842f4eceb11e61f247212b04b692bfb397f8b7/data/train-00000-of-00001.parquet
+P=https://raw.githubusercontent.com/woraamy/Agent-Context-File-Analysis/77b16a9a53c99efcda1c98c98c4afcd807f7227c/datasets/derived/classification/inputs
+curl -LO $P/final_am_classification_3.csv
+curl -LO $P/gpt_5_file_classifications.csv
+cd -
+
+# 1. Importa os arquivos e os rótulos para data/external/agentreadmes (formato da saída do analyze)
+poetry run agm rq1 agentreadmes import data/sources/agentreadmes/train-00000-of-00001.parquet \
+  --human-labels data/sources/agentreadmes/final_am_classification_3.csv \
+  --gpt5-labels data/sources/agentreadmes/gpt_5_file_classifications.csv
+# 2. Classifica com o codebook do artigo (qualquer comando agm rq1 aceita --gold)
+poetry run agm rq1 classify --gold data/external/agentreadmes --codebook codebooks/seed_agent_readmes.yaml
+# 3. Concordância por arquivo: humano × nosso classificador, humano × GPT-5, GPT-5 × nosso
+poetry run agm rq1 agentreadmes score
+poetry run agm rq1 agentreadmes score --tool CLAUDE --tool AGENTS   # só as ferramentas do estudo
+```
+
+- **O que a importação grava** (`data/external/agentreadmes/`): `rq1_sections.parquet`, com os
+  arquivos quebrados em seções pelo mesmo parser do `analyze`; `files.parquet`, com URL e
+  metadados de cada arquivo; `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos
+  ids do `seed_agent_readmes.yaml`; e um `analysis_manifest.json` com o SHA-256 de cada fonte. Os
+  ids são derivados do conteúdo (URLs e nomes ordenados), então a mesma fonte gera sempre os
+  mesmos ids. Um rótulo que não está na tabela de correspondência faz a importação parar.
+- **Os 16 rótulos são aplicados por arquivo no artigo.** O nosso classificador rotula seções, e um
+  arquivo recebe todas as categorias das suas seções (`other` não conta). Essa união tende a
+  marcar mais categorias que um humano lendo o arquivo inteiro (mais revocação, menos precisão).
+  Um arquivo sem nenhuma seção com texto fica sem categoria.
+- **Arquivos ficam de fora da comparação** quando não estão no dataset (8 dos 332 rotulados) ou
+  quando a classificação não terminou (`unclassified_files`, por exemplo depois de um
+  `classify --limit`). As três comparações usam sempre o mesmo conjunto de arquivos.
+- **O `copilot-instructions.md` é importado** (ferramenta `COPILOT`), porque a validação mede o
+  classificador e independe da ferramenta: tirá-lo deixaria 202 arquivos rotulados em vez de 324 e
+  as categorias raras quase sem exemplos. O resultado sai também por ferramenta, e `--tool`
+  restringe o score às ferramentas do estudo, para comparar com o nosso corpus.
+- **Conferência da correspondência dos rótulos:** com os 332 arquivos, o `agreement` deste projeto
+  aplicado a humano × GPT-5 reproduz o relatório do artigo (precisão micro 0,7326, revocação micro
+  0,8632, F1 micro 0,7925 e F1 macro 0,7270).
+- Saídas em `DATA_DIR/rq1/agentreadmes/agentreadmes/<codebook>/<provedor>/<modelo>/`:
+  `scores.json`, `scores.md` e o manifesto (ou `scores-AGENTS-CLAUDE.*` com `--tool`).
+- O dataset e o pacote de replicação não declaram licença: cite o artigo e não redistribua os
+  arquivos.
+
 ## Testes
 
 ```bash

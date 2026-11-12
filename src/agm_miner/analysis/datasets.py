@@ -119,27 +119,36 @@ def build_version_tables(
             {"version_id": row["id"], "artifact_id": row["artifact_id"], "repo_id": row["repo_id"]}
             | metrics_row
         )
-        for section in document.sections:
-            section_rows.append(
-                {
-                    "version_id": row["id"],
-                    "artifact_id": row["artifact_id"],
-                    "repo_id": row["repo_id"],
-                    "position": section.position,
-                    "level": section.level,
-                    "heading": section.heading,
-                    "heading_path": list(section.path),
-                    "h1": section.ancestor(1),
-                    "h2": section.ancestor(2),
-                    "h3": section.ancestor(3),
-                    "text": section.text,
-                    "words": count_words(section.text),
-                }
-            )
+        section_rows.extend(
+            document_section_rows(document, row["id"], row["artifact_id"], row["repo_id"])
+        )
 
     metrics_frame = pl.DataFrame(metric_rows, schema=_METRICS_SCHEMA)
-    sections_frame = pl.DataFrame(section_rows, schema=_SECTIONS_SCHEMA)
+    sections_frame = pl.DataFrame(section_rows, schema=SECTIONS_SCHEMA)
     return metrics_frame, sections_frame, documents
+
+
+def document_section_rows(
+    document: ParsedDocument, version_id: int, artifact_id: int, repo_id: int
+) -> list[dict[str, Any]]:
+    """Rows of ``version_sections`` (``SECTIONS_SCHEMA``) for one parsed document."""
+    return [
+        {
+            "version_id": version_id,
+            "artifact_id": artifact_id,
+            "repo_id": repo_id,
+            "position": section.position,
+            "level": section.level,
+            "heading": section.heading,
+            "heading_path": list(section.path),
+            "h1": section.ancestor(1),
+            "h2": section.ancestor(2),
+            "h3": section.ancestor(3),
+            "text": section.text,
+            "words": count_words(section.text),
+        }
+        for section in document.sections
+    ]
 
 
 _METRICS_SCHEMA = {
@@ -180,7 +189,7 @@ _METRICS_SCHEMA = {
     "flesch_kincaid_grade": pl.Float64,
 }
 
-_SECTIONS_SCHEMA = {
+SECTIONS_SCHEMA = {
     "version_id": pl.Int64,
     "artifact_id": pl.Int64,
     "repo_id": pl.Int64,

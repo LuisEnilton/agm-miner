@@ -9,8 +9,10 @@ category, as two binary decisions per section (has / has not the category):
 * prevalence of the category for each rater.
 
 Macro averages and 95% bootstrap confidence intervals (resampling sections, seeded) summarise
-the categories. Kappa is undefined when both raters never (or always) use a category; such
-categories are reported with ``None`` and left out of the macro average.
+the categories; micro precision, recall and F1 pool the decisions of every category (the
+summary Chatlatanagulchai et al. report for their GPT-5 classifier). Kappa is undefined when
+both raters never (or always) use a category; such categories are reported with ``None`` and
+left out of the macro average.
 """
 
 from __future__ import annotations
@@ -81,6 +83,22 @@ def _macro(rows: Sequence[CategoryAgreement], field: str) -> float | None:
     return float(np.mean(values)) if values else None
 
 
+def _micro(
+    a: Sequence[frozenset[str]], b: Sequence[frozenset[str]], categories: Sequence[str]
+) -> dict[str, float | None]:
+    wanted = set(categories)
+    true_positive = sum(len(x & y & wanted) for x, y in zip(a, b, strict=True))
+    predicted = sum(len(y & wanted) for y in b)
+    actual = sum(len(x & wanted) for x in a)
+    precision = true_positive / predicted if predicted else None
+    recall = true_positive / actual if actual else None
+    if precision is None or recall is None:
+        f1 = None
+    else:
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {"micro_precision": precision, "micro_recall": recall, "micro_f1": f1}
+
+
 def agreement(
     a: Mapping[str, frozenset[str]],
     b: Mapping[str, frozenset[str]],
@@ -122,5 +140,6 @@ def agreement(
         "macro_kappa_ci95": interval(samples["kappa"]),
         "macro_f1": _macro(rows, "f1"),
         "macro_f1_ci95": interval(samples["f1"]),
+        **_micro(left, right, categories),
         "categories": [asdict(row) for row in rows],
     }

@@ -48,6 +48,11 @@ rq1_validate_app = typer.Typer(
     help="Validate the classification against hand labels (export, llm, score).",
 )
 rq1_app.add_typer(rq1_validate_app, name="validate")
+rq1_agentreadmes_app = typer.Typer(
+    no_args_is_help=True,
+    help="External validation on the Agent READMEs dataset (import, score).",
+)
+rq1_app.add_typer(rq1_agentreadmes_app, name="agentreadmes")
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -90,6 +95,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         from agm_miner.database.schema import SchemaMismatchError
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
+        from agm_miner.rq1.agentreadmes import AgentReadmesError, OutputExistsError
         from agm_miner.rq1.llm import LLMAuthError, LLMRequestError
         from agm_miner.rq1.prompts import InvalidAnswer
         from agm_miner.rq1.stages import (
@@ -129,6 +135,8 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             ValidationSheetExistsError,
             SelectionError,
             RepositoryLookupError,
+            AgentReadmesError,
+            OutputExistsError,
             FileNotFoundError,
         ) as exc:
             typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
@@ -799,6 +807,77 @@ def rq1_validate_score(
             retest=retest,
             provider=study.rq1.provider,
             model=study.rq1.classify_model,
+        )
+    )
+
+
+@rq1_agentreadmes_app.command("import")
+@_handle_errors
+def rq1_agentreadmes_import(
+    dataset: Annotated[
+        Path, typer.Argument(exists=True, dir_okay=False, help="Dataset Parquet (Hugging Face).")
+    ],
+    human_labels: Annotated[
+        Path | None,
+        typer.Option(exists=True, dir_okay=False, help="final_am_classification_3.csv"),
+    ] = None,
+    gpt5_labels: Annotated[
+        Path | None,
+        typer.Option(exists=True, dir_okay=False, help="gpt_5_file_classifications.csv"),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option(help="Output folder (default: DATA_DIR/external/agentreadmes)."),
+    ] = None,
+    force: Annotated[bool, typer.Option(help="Replace an existing output.")] = False,
+) -> None:
+    """Import the Agent READMEs files (and the paper's labels) as an analysis output; then run
+    `agm rq1 classify --gold <output> --codebook codebooks/seed_agent_readmes.yaml`."""
+    from agm_miner.rq1.agentreadmes import import_agentreadmes
+
+    settings, _ = _context(None)
+    _print(
+        import_agentreadmes(
+            dataset,
+            output or settings.external_dir / "agentreadmes",
+            human_path=human_labels,
+            gpt5_path=gpt5_labels,
+            force=force,
+        )
+    )
+
+
+@rq1_agentreadmes_app.command("score")
+@_handle_errors
+def rq1_agentreadmes_score(
+    gold: Annotated[
+        Path | None,
+        typer.Option(help="The imported dataset (default: DATA_DIR/external/agentreadmes)."),
+    ] = None,
+    codebook: Annotated[
+        Path, typer.Option(help="Codebook of the classification and of the reference labels.")
+    ] = Path("codebooks/seed_agent_readmes.yaml"),
+    tool: Annotated[
+        list[str] | None,
+        typer.Option("--tool", help="Score only this tool (CLAUDE, AGENTS, COPILOT); repeatable."),
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """File-level agreement of the classification with the paper's human labels, next to GPT-5,
+    overall and per tool (model: rq1.provider and rq1.classify_model)."""
+    from agm_miner.rq1.agentreadmes import score_agentreadmes
+
+    settings, study = _context(study_path)
+    gold_dir, output_dir = _rq1_dirs(settings, gold or settings.external_dir / "agentreadmes")
+    _print(
+        score_agentreadmes(
+            gold_dir,
+            output_dir,
+            study.rq1,
+            codebook_path=codebook,
+            provider=study.rq1.provider,
+            model=study.rq1.classify_model,
+            tools=tool,
         )
     )
 

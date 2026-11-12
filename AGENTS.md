@@ -64,6 +64,8 @@ src/agm_miner/
   rq1/                # RQ1 com LLM: units (section_key), sampling, codebook, llm (SDK anthropic,
                       # Batches), store (cache + estado dos lotes), execution (lotes retomáveis),
                       # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)
+                      # agentreadmes (dataset do Agent READMEs como saída do analyze, para
+                      # validação externa contra os rótulos humanos do artigo)
   database/           # models.py (schema), session.py (engine único por URL) e schema.py
                       # (todo comando do CLI recusa um banco fora da revisão head do Alembic)
 ```
@@ -172,6 +174,13 @@ falha se a migração divergir dos modelos.
 - A chave do cache (`store.request_key`) precisa cobrir tudo o que determina a resposta (fase,
   provedor, modelo, versão do prompt, hash do codebook, `section_key`). Ao mudar um prompt, mude a
   versão.
+- Validação externa (`rq1/agentreadmes.py`): `agm rq1 agentreadmes import` grava o dataset do
+  *Agent READMEs* em `DATA_DIR/external/agentreadmes/` no formato da saída do `analyze`
+  (`rq1_sections` + `analysis_manifest.json`), então todos os comandos da RQ1 rodam nele com
+  `--gold`. Os rótulos do artigo são mapeados por tabela explícita para o
+  `seed_agent_readmes.yaml`; um rótulo desconhecido faz a importação falhar. O `score` agrega as
+  categorias das seções por arquivo e compara com os rótulos humanos, com o GPT-5 como linha de
+  base. Nada é filtrado na importação (o `COPILOT` fica); `--tool` filtra no score.
 - Modelos, effort e tamanhos de amostra ficam em `rq1:` no `study.yaml`; o codebook curado fica em
   `codebooks/` (versionado). Testes usam SDKs/clientes falsos, nunca a API real.
 

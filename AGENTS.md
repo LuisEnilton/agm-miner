@@ -233,8 +233,16 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
   `stars:` não funciona nela, por isso o filtro de estrelas fica no estágio `select`.
 - As heurísticas de "tutorial/lista" (`exclude_keywords`), de bots, de agentes e dos papéis de
   autor precisam de validação manual numa amostra antes da coleta final.
-- `hours_since_previous_change` usa a data de autoria (rebases podem distorcer). Flesch só é
-  calculado para textos detectados como inglês, e listas sem pontuação distorcem o índice.
+- `hours_since_previous_change` usa a data de autoria (rebases podem distorcer).
+- Flesch só é calculado para textos detectados como inglês, e sobre `readability_text`
+  (`analysis/markdown.py`): parágrafos e itens de lista, sem títulos, tabelas e código. Cada
+  bloco é tratado como uma frase e termina em `.!?` (o textstat só separa frases por esses três
+  sinais; `:;,` no fim viram ponto). Blocos de 1 ou 2 palavras (rótulos, links soltos) ficam de
+  fora, porque o textstat não os conta como frases mas contaria as palavras. Sem isso, um arquivo
+  só de bullets virava uma frase única (grau acima de 20). Ainda distorcem o índice os blocos
+  formados por caminhos ou URLs sem espaços (muitas sílabas por "palavra").
+- Itens de lista tight não contam como parágrafos, URLs soltas contam como links e o BOM UTF-8 é
+  ignorado antes do frontmatter.
 - `reference_date` no `study.yaml` fica fixa durante a coleta. O corte `created_before` do estudo
   (2026-08-01) é mais tardio que o dos artigos relacionados (2024-01-01, o padrão de `config.py`),
   então a amostra inclui projetos criados já com agentes.

@@ -209,7 +209,8 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
   symlink, renomeação). O minerador os clona via `file://` com filtro de blobs, o mesmo caminho da
   produção.
 - `tests/db_fixtures.py` recria o schema com `alembic upgrade head` a cada sessão e trunca as
-  tabelas entre testes.
+  tabelas entre testes. O banco vem de `TEST_DATABASE_URL` (ambiente, senão o `.env` da pasta):
+  agentes em paralelo usam um `git worktree` cada, com o seu banco de testes.
 - Clientes GitHub falsos (`FakeRequester`, `FakeSearch`, `FakeGraphQL`) simulam paginação, o limite
   de 1000 resultados, 403/408/429/5xx, erros de rede e `NOT_FOUND`; `github_stub` sobe um servidor
   HTTP local para testar o `default_requester` real.

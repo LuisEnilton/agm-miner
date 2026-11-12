@@ -41,3 +41,14 @@ def test_fingerprint_is_stable_and_sensitive() -> None:
     assert base.fingerprint() == StudyConfig().fingerprint()
     changed = StudyConfig.model_validate({"selection": {"min_stars": 51}})
     assert changed.fingerprint() != base.fingerprint()
+
+
+def test_test_database_url_comes_from_the_environment_then_the_env_file(tmp_path: Path) -> None:
+    from tests.conftest import _DEFAULT_TEST_DATABASE_URL, resolve_test_database_url
+
+    env_file = tmp_path / ".env"
+    assert resolve_test_database_url({}, env_file) == _DEFAULT_TEST_DATABASE_URL  # no .env
+    env_file.write_text("DATABASE_URL=postgresql://x/dev\nTEST_DATABASE_URL=postgresql://x/rq2\n")
+    assert resolve_test_database_url({}, env_file) == "postgresql://x/rq2"
+    environ = {"TEST_DATABASE_URL": "postgresql://x/ci"}
+    assert resolve_test_database_url(environ, env_file) == "postgresql://x/ci"

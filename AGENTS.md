@@ -31,6 +31,7 @@ poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silv
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
 poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
+poetry run agm runs cleanup         # RUNNING sem heartbeat há > --minutes vira INTERRUPTED
 poetry run agm rq1 sample           # RQ1: amostra para a criação de labels com LLM
 poetry run agm rq1 propose | consolidate   # RQ1: rótulos livres → rascunho do codebook
 poetry run agm rq1 classify | saturation   # RQ1: categorias de todas as seções / cobertura
@@ -86,7 +87,9 @@ Princípios que precisam ser mantidos:
    precisa de blobs. Os blobs de artefatos são baixados em lote (`prefetch_blobs`); não dispare lazy
    fetch objeto por objeto. Renomeação/cópia (`-M -C`) só roda nos commits que adicionaram artefatos.
 7. **Pacing da API do GitHub**: toda chamada passa por `GitHubClient._request` (intervalo mínimo
-   de 6,5s na code search, quota lida dos headers, retry com limite). Não chame o PyGithub direto.
+   de 6,5s na code search, quota lida dos headers, retry com limite para 403 de rate limit, 408,
+   429, 5xx e erros de rede). O PyGithub roda com `retry=0` (`default_requester`): a política de
+   retry dele faria o urllib3 levantar `RetryError` no primeiro 5xx. Não chame o PyGithub direto.
 8. **Todo estágio pode ser interrompido e retomado** (seção "Usando o CLI" do README):
    - o estado fica só no Postgres, e cada unidade de trabalho (página/fatia, lote, repositório) é
      commitada inteira;
@@ -199,7 +202,8 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
 - `tests/db_fixtures.py` recria o schema com `alembic upgrade head` a cada sessão e trunca as
   tabelas entre testes.
 - Clientes GitHub falsos (`FakeRequester`, `FakeSearch`, `FakeGraphQL`) simulam paginação, o limite
-  de 1000 resultados, 403/429/5xx e `NOT_FOUND`.
+  de 1000 resultados, 403/408/429/5xx, erros de rede e `NOT_FOUND`; `github_stub` sobe um servidor
+  HTTP local para testar o `default_requester` real.
 - `tests/test_end_to_end.py` roda minerar → exportar → analisar e verifica as tabelas gold.
 
 ## Limitações conhecidas (ameaças à validade)

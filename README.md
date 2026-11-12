@@ -108,7 +108,9 @@ Um repositório nunca fica pela metade no banco: ou todos os dados dele são gra
 Se o processo for morto sem chance de reagir (`kill -9`, queda de energia), os dados continuam
 consistentes pelo mesmo motivo. A única diferença é que a execução fica como `RUNNING` em
 `agm runs list`, com `"stale": true`, e o `agm status` a mostra como "no sign of life". Basta
-rodar o comando de novo.
+rodar o comando de novo. Para tirar essas execuções do `agm status`, `agm runs cleanup` as registra
+como `INTERRUPTED` (só as que estão sem sinal de vida há mais de `--minutes`, padrão 60; um
+processo apenas suspenso, como num notebook que dormiu, também fica em silêncio).
 
 ### Posso rodar em dois terminais?
 
@@ -137,6 +139,7 @@ poetry run agm mine --workers 4
 poetry run agm status --watch # o que está rodando agora e em que ponto (atualiza ao vivo)
 poetry run agm runs list      # execuções, status (RUNNING/SUCCEEDED/INTERRUPTED/FAILED) e estatísticas
 poetry run agm runs funnel    # quantos repositórios em cada status e por que foram rejeitados
+poetry run agm runs cleanup   # registra como INTERRUPTED as execuções mortas (sem sinal de vida)
 ```
 
 ### Acompanhando o progresso

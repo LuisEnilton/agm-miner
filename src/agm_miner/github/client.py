@@ -6,8 +6,9 @@ Every request goes through :meth:`GitHubClient._request`, which
   10 requests per minute; exceeding it trips GitHub's secondary rate limits / abuse detection),
 * tracks the remaining quota per bucket from the ``x-ratelimit-*`` response headers and sleeps
   until the reset when it drops under the configured threshold,
-* retries rate-limit errors and transient 5xx responses with bounded exponential backoff
-  (``Retry-After`` is honoured), and fails loudly after ``GITHUB_MAX_RETRIES``.
+* retries rate-limit errors, transient 408/5xx responses and network errors with bounded
+  exponential backoff (``Retry-After`` is honoured), and fails loudly after
+  ``GITHUB_MAX_RETRIES``.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from github import Auth, BadCredentialsException, Github, GithubException, GithubRetry
+import requests
+from github import Auth, BadCredentialsException, Github, GithubException
 
 from agm_miner.config import Settings
 
@@ -31,7 +33,8 @@ GRAPHQL = "graphql"
 _MIN_INTERVAL_SECONDS = {CODE_SEARCH: 6.5, GRAPHQL: 1.0}
 _BACKOFF_BASE_SECONDS = 30.0
 _BACKOFF_MAX_SECONDS = 900.0
-_TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
+_TRANSIENT_STATUSES = frozenset({408, 500, 502, 503, 504})
+_NETWORK_ERRORS = (requests.ConnectionError, requests.Timeout)
 
 
 class GitHubAuthError(RuntimeError):
@@ -75,6 +78,17 @@ class CodeSearchPage:
     hits: list[CodeSearchHit]
 
 
+def default_requester(token: str, *, base_url: str | None = None) -> Requester:
+    """PyGithub requester without its own retries: every error status reaches
+    :meth:`GitHubClient._request` as a ``GithubException``. (A ``GithubRetry(total=0)`` would
+    not do: its status list makes urllib3 raise ``RetryError`` on the first 5xx instead.)"""
+    options: dict[str, Any] = {"base_url": base_url} if base_url else {}
+    github = Github(
+        auth=Auth.Token(token), retry=0, seconds_between_requests=None, timeout=60, **options
+    )
+    return github.requester
+
+
 class GitHubClient:
     def __init__(
         self,
@@ -89,13 +103,7 @@ class GitHubClient:
         if requester is None:
             if settings.github_token is None:
                 raise GitHubAuthError("GITHUB_TOKEN is not configured (see .env.sample).")
-            github = Github(
-                auth=Auth.Token(settings.github_token.get_secret_value()),
-                retry=GithubRetry(total=0),
-                seconds_between_requests=None,
-                timeout=60,
-            )
-            requester = github.requester
+            requester = default_requester(settings.github_token.get_secret_value())
         self._requester = requester
         self._sleep = sleep
         self._wait_observer: Callable[[str, float], AbstractContextManager[Any]] = (
@@ -172,24 +180,31 @@ class GitHubClient:
                     raise GitHubRequestError(
                         f"{verb} {url} failed with status {exc.status}: {exc.data!r}"
                     ) from exc
-                delay = self._retry_delay(exc, attempt)
-                logger.warning(
-                    "GitHub %s request failed with %s (attempt %s/%s); retrying in %.0fs",
-                    bucket,
-                    exc.status,
-                    attempt + 1,
-                    max_retries,
-                    delay,
-                )
-                self._wait(
-                    f"GitHub {bucket} request failed with {exc.status}; "
-                    f"retry {attempt + 1}/{max_retries}",
-                    delay,
-                )
+                self._back_off(bucket, exc.status, self._retry_delay(exc, attempt), attempt)
+                continue
+            except _NETWORK_ERRORS as exc:
+                if attempt == max_retries:
+                    raise GitHubRequestError(f"{verb} {url} failed: {exc!r}") from exc
+                self._back_off(bucket, type(exc).__name__, self._backoff(attempt), attempt)
                 continue
             self._record_headers(state, headers)
             return data
         raise AssertionError("unreachable")
+
+    def _back_off(self, bucket: str, cause: object, delay: float, attempt: int) -> None:
+        max_retries = self._settings.github_max_retries
+        logger.warning(
+            "GitHub %s request failed with %s (attempt %s/%s); retrying in %.0fs",
+            bucket,
+            cause,
+            attempt + 1,
+            max_retries,
+            delay,
+        )
+        self._wait(
+            f"GitHub {bucket} request failed with {cause}; retry {attempt + 1}/{max_retries}",
+            delay,
+        )
 
     def _pace(self, bucket: str, state: _BucketState) -> None:
         interval = _MIN_INTERVAL_SECONDS.get(bucket, 0.0)
@@ -246,4 +261,8 @@ class GitHubClient:
         if headers.get("x-ratelimit-remaining") == "0" and "x-ratelimit-reset" in headers:
             wait = float(headers["x-ratelimit-reset"]) - self._wall_clock()
             return max(wait, 0.0) + self._settings.rate_limit_sleep_buffer_seconds
+        return self._backoff(attempt)
+
+    @staticmethod
+    def _backoff(attempt: int) -> float:
         return min(_BACKOFF_BASE_SECONDS * 2**attempt, _BACKOFF_MAX_SECONDS)

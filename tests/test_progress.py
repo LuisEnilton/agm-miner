@@ -285,3 +285,60 @@ def test_pipeline_panel_tells_finishing_from_starting() -> None:
     state["runs"] = {}  # mine's run ended; its process is still exiting
     second = text(panel())
     assert "finishing…" in second and "starting…" in second
+
+
+@pytest.mark.db
+def test_runs_cleanup_interrupts_only_long_silent_runs(session_factory) -> None:
+    now = datetime.now(UTC)
+    common = {"code_version": "x", "study_config_hash": "h", "study_config": {}}
+    runs = {
+        "alive": PipelineRun(
+            stage=RunStage.MINE, status=RunStatus.RUNNING, heartbeat_at=now, **common
+        ),
+        "silent_briefly": PipelineRun(
+            stage=RunStage.MINE,
+            status=RunStatus.RUNNING,
+            heartbeat_at=now - timedelta(minutes=10),
+            **common,
+        ),
+        "killed": PipelineRun(
+            stage=RunStage.MINE,
+            status=RunStatus.RUNNING,
+            heartbeat_at=now - timedelta(hours=2),
+            **common,
+        ),
+        "before_heartbeats": PipelineRun(
+            stage=RunStage.DISCOVER,
+            status=RunStatus.RUNNING,
+            started_at=now - timedelta(hours=3),
+            **common,
+        ),
+        "finished": PipelineRun(
+            stage=RunStage.EXPORT,
+            status=RunStatus.SUCCEEDED,
+            heartbeat_at=now - timedelta(days=1),
+            **common,
+        ),
+    }
+    with session_factory() as session, session.begin():
+        session.add_all(runs.values())
+        session.flush()
+        ids = {name: run.id for name, run in runs.items()}
+
+    result = CliRunner().invoke(app, ["runs", "cleanup", "--minutes", "60"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"interrupted": [ids["killed"], ids["before_heartbeats"]]}
+
+    with session_factory() as session:
+        status = {name: session.get(PipelineRun, run_id) for name, run_id in ids.items()}
+        assert status["killed"].status is RunStatus.INTERRUPTED
+        assert "no sign of life" in status["killed"].error
+        assert status["killed"].finished_at is not None
+        assert status["before_heartbeats"].status is RunStatus.INTERRUPTED
+        assert status["alive"].status is RunStatus.RUNNING
+        assert status["silent_briefly"].status is RunStatus.RUNNING
+        assert status["finished"].status is RunStatus.SUCCEEDED
+
+    # Nothing left to clean: a second call is a no-op.
+    again = CliRunner().invoke(app, ["runs", "cleanup"])
+    assert json.loads(again.output) == {"interrupted": []}

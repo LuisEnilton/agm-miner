@@ -172,6 +172,39 @@ def is_stale(run: PipelineRun, now: datetime | None = None) -> bool:
     return (now or datetime.now(UTC)) - run.heartbeat_at > STALE_AFTER
 
 
+def mark_stale_runs(
+    session_factory: sessionmaker[Session],
+    *,
+    silent_for: timedelta,
+    now: datetime | None = None,
+) -> list[int]:
+    """Record as INTERRUPTED the RUNNING runs without a heartbeat for ``silent_for`` (their
+    process was killed without a chance to react); returns their ids.
+
+    A merely suspended process (laptop asleep) is silent too, hence the explicit, generous
+    window. If such a run wakes up, its own ``_finish`` overwrites the status again.
+    """
+    now = now or datetime.now(UTC)
+    marked: list[int] = []
+    with session_factory() as session, session.begin():
+        for run in session.scalars(
+            select(PipelineRun)
+            .where(PipelineRun.status == RunStatus.RUNNING)
+            .order_by(PipelineRun.id)
+            .with_for_update(skip_locked=True)
+        ):
+            last_sign = run.heartbeat_at or run.started_at
+            if now - last_sign <= max(silent_for, STALE_AFTER):
+                continue
+            run.status = RunStatus.INTERRUPTED
+            run.finished_at = now
+            run.error = f"no sign of life since {last_sign.isoformat()}: process was killed"
+            marked.append(run.id)
+    if marked:
+        logger.info("Marked stale runs %s as INTERRUPTED", marked)
+    return marked
+
+
 def _finish(
     session_factory: sessionmaker[Session],
     context: RunContext,

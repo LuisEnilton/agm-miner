@@ -462,6 +462,26 @@ def runs_list(limit: Annotated[int, typer.Option(help="Show the N latest runs.")
         )
 
 
+@runs_app.command("cleanup")
+@_handle_errors
+def runs_cleanup(
+    minutes: Annotated[
+        int,
+        typer.Option(
+            min=1, help="Silence (minutes without a heartbeat) after which a run counts as dead."
+        ),
+    ] = 60,
+) -> None:
+    """Record RUNNING runs with no sign of life (killed processes) as INTERRUPTED."""
+    from datetime import timedelta
+
+    from agm_miner.runs import mark_stale_runs
+
+    settings, _ = _context(None)
+    marked = mark_stale_runs(_database(settings), silent_for=timedelta(minutes=minutes))
+    _print({"interrupted": marked})
+
+
 @runs_app.command()
 @_handle_errors
 def funnel() -> None:

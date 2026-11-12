@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
+import requests
 from github import BadCredentialsException, GithubException, RateLimitExceededException
 
 from agm_miner.config import Settings
@@ -12,6 +16,7 @@ from agm_miner.github.client import (
     GitHubAuthError,
     GitHubClient,
     GitHubRequestError,
+    default_requester,
 )
 
 Response = tuple[dict[str, Any], Any] | Exception
@@ -124,6 +129,76 @@ def test_retries_transient_errors_with_bounded_attempts(make_client) -> None:
         client.graphql("query { viewer { login } }")
     assert len(requester.calls) == 3
     assert [s for s in clock.sleeps if s >= 30] == [30.0, 60.0]
+
+
+def test_retries_search_timeouts(make_client) -> None:
+    timeout = GithubException(408, {"message": "Request timed out while fetching results."}, {})
+    client, requester, _ = make_client([timeout, ({}, search_page(0))])
+    assert client.search_code("q", page=1).total_count == 0
+    assert len(requester.calls) == 2
+
+
+def test_retries_network_errors_with_bounded_attempts(make_client) -> None:
+    errors = [requests.ConnectionError("connection reset") for _ in range(3)]
+    client, requester, clock = make_client(errors, GITHUB_MAX_RETRIES=2)
+    with pytest.raises(GitHubRequestError, match="ConnectionError"):
+        client.graphql("query { viewer { login } }")
+    assert len(requester.calls) == 3
+    assert [s for s in clock.sleeps if s >= 30] == [30.0, 60.0]
+
+
+@contextmanager
+def github_stub(statuses: list[int]) -> Iterator[str]:
+    """Local HTTP server answering each request with the next status (JSON body)."""
+    pending = list(statuses)
+
+    class Handler(BaseHTTPRequestHandler):
+        def _answer(self) -> None:
+            status = pending.pop(0)
+            body = json.dumps({"message": f"status {status}", "data": {}}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = _answer  # noqa: N815 - http.server's names
+
+        def log_message(self, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.parametrize("status", [502, 403])
+def test_default_requester_surfaces_error_statuses_to_the_client(status: int) -> None:
+    # PyGithub's own retry policy turned these into urllib3 RetryErrors, which skipped the
+    # client's backoff (the select run of 2026-11-12 died on "too many 502 error responses").
+    with github_stub([status]) as url:
+        requester = default_requester("token", base_url=url)
+        with pytest.raises(GithubException) as info:
+            requester.requestJsonAndCheck("POST", "/graphql", input={"query": "{}"})
+    assert info.value.status == status
+
+
+def test_client_retries_a_real_502_and_succeeds() -> None:
+    with github_stub([502, 200]) as url:
+        clock = FakeClock()
+        client = GitHubClient(
+            Settings(DATABASE_URL="postgresql://unused"),
+            requester=default_requester("token", base_url=url),
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+            wall_clock=clock.wall,
+        )
+        assert client.graphql("query { viewer { login } }")["message"] == "status 200"
+    assert 30.0 in clock.sleeps
 
 
 def test_every_wait_is_reported_with_its_reason(make_client) -> None:

@@ -36,6 +36,7 @@ poetry run agm rq1 sample           # RQ1: amostra para a criação de labels co
 poetry run agm rq1 propose | consolidate   # RQ1: rótulos livres → rascunho do codebook
 poetry run agm rq1 classify | saturation   # RQ1: categorias de todas as seções / cobertura
 poetry run agm rq1 validate export | llm | score   # RQ1: planilha cega, réplicas, kappa
+poetry run agm rq1 compare --model p:m --model p:m # RQ1: dois classificadores comparados
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
 poetry run ruff check . && poetry run ruff format .
@@ -177,6 +178,10 @@ falha se a migração divergir dos modelos.
 - A chave do cache (`store.request_key`) precisa cobrir tudo o que determina a resposta (fase,
   provedor, modelo, versão do prompt, hash do codebook, `section_key`). Ao mudar um prompt, mude a
   versão.
+- Dois classificadores: `--model provedor:modelo` (`Rq1Config.with_classifier`) troca provedor e
+  `classify_model` numa execução de `classify`, `saturation` e `validate llm/score`. Tudo o que um
+  modelo gera fica em pastas por provedor/modelo (o score de validação inclusive), e
+  `stages.compare_models` compara dois modelos na amostra de validação e em todas as seções.
 - Validação externa (`rq1/agentreadmes.py`): `agm rq1 agentreadmes import` grava o dataset do
   *Agent READMEs* em `DATA_DIR/external/agentreadmes/` no formato da saída do `analyze`
   (`rq1_sections` + `analysis_manifest.json`), então todos os comandos da RQ1 rodam nele com

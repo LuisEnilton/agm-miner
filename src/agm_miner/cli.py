@@ -101,6 +101,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         from agm_miner.rq1.stages import (
             IncompleteProposalsError,
             InvalidSheetError,
+            NothingToCompareError,
             SampleMismatchError,
             ValidationSheetExistsError,
         )
@@ -132,6 +133,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             SampleMismatchError,
             IncompleteProposalsError,
             InvalidSheetError,
+            NothingToCompareError,
             ValidationSheetExistsError,
             SelectionError,
             RepositoryLookupError,
@@ -675,12 +677,40 @@ CodebookOption = Annotated[
 ]
 
 
-def _rq1_backend_run(stage: str, phase: str, study_path: Path | None, gold: Path | None, run):
+ModelOption = Annotated[
+    str | None,
+    typer.Option(
+        "--model",
+        help="Classifier as provider:model, e.g. gemini:gemini-3.5-flash-lite (default: "
+        "rq1.provider and rq1.classify_model).",
+    ),
+]
+
+
+def _with_classifier(study: StudyConfig, model: str | None) -> StudyConfig:
+    """``study`` with the ``--model`` classifier (recorded in every manifest's rq1_config)."""
+    if model is None:
+        return study
+    try:
+        return study.model_copy(update={"rq1": study.rq1.with_classifier(model)})
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--model") from exc
+
+
+def _rq1_backend_run(
+    stage: str,
+    phase: str,
+    study_path: Path | None,
+    gold: Path | None,
+    run,
+    model: str | None = None,
+):
     """Shared plumbing of the LLM commands: backend of ``phase``, live progress, JSON result."""
     from agm_miner.progress import Progress, publishing
     from agm_miner.rq1.backends import make_backend
 
     settings, study = _context(study_path)
+    study = _with_classifier(study, model)
     gold_dir, output_dir = _rq1_dirs(settings, gold)
     backend = make_backend(settings, study.rq1, phase)
     with publishing(Progress(stage)) as progress, _showing_progress():
@@ -696,6 +726,7 @@ def rq1_classify(
     limit: Annotated[
         int | None, typer.Option(min=1, help="Send at most N requests (a pilot run).")
     ] = None,
+    model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """Categories of every section with text (rq1.classify_model), file by file. Cached and
@@ -716,13 +747,17 @@ def rq1_classify(
             limit=limit,
             progress=progress,
         ),
+        model,
     )
 
 
 @rq1_app.command("saturation")
 @_handle_errors
 def rq1_saturation(
-    gold: GoldOption = None, codebook: CodebookOption = None, study_path: StudyOption = None
+    gold: GoldOption = None,
+    codebook: CodebookOption = None,
+    model: ModelOption = None,
+    study_path: StudyOption = None,
 ) -> None:
     """Classify a fresh sample to measure how many sections fit no category."""
     from agm_miner.rq1.stages import saturation
@@ -740,6 +775,7 @@ def rq1_saturation(
             codebook_path=codebook or study.rq1.codebook,
             progress=progress,
         ),
+        model,
     )
 
 
@@ -777,6 +813,7 @@ def rq1_validate_llm(
     replicate: Annotated[
         int, typer.Option(min=1, help="1 for the LLM labels, 2+ for stability repetitions.")
     ] = 1,
+    model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """The LLM's labels for the validation sample (rq1.classify_model)."""
@@ -796,6 +833,7 @@ def rq1_validate_llm(
             replicate=replicate,
             progress=progress,
         ),
+        model,
     )
 
 
@@ -811,12 +849,14 @@ def rq1_validate_score(
     ] = None,
     gold: GoldOption = None,
     codebook: CodebookOption = None,
+    model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """Agreement: human x LLM, LLM x LLM (stability) and human x human (re-test)."""
     from agm_miner.rq1.stages import score_validation
 
     settings, study = _context(study_path)
+    study = _with_classifier(study, model)
     _, output_dir = _rq1_dirs(settings, gold)
     _print(
         score_validation(
@@ -827,6 +867,48 @@ def rq1_validate_score(
             retest=retest,
             provider=study.rq1.provider,
             model=study.rq1.classify_model,
+        )
+    )
+
+
+@rq1_app.command("compare")
+@_handle_errors
+def rq1_compare(
+    model: Annotated[
+        list[str],
+        typer.Option(
+            "--model", help="A classifier as provider:model; give exactly two (A, then B)."
+        ),
+    ],
+    human: Annotated[
+        Path | None,
+        typer.Option(help="The filled validation sheet, for human x A and human x B."),
+    ] = None,
+    gold: GoldOption = None,
+    codebook: CodebookOption = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Compare two classifiers: on the validation sample (human x A, human x B, A x B) and on
+    every section (A x B, label prevalence), with what `validate llm --model` and `classify
+    --model` produced for each."""
+    from agm_miner.rq1.stages import compare_models
+
+    if len(model) != 2:
+        raise typer.BadParameter("give exactly two models", param_hint="--model")
+    settings, study = _context(study_path)
+    models = []
+    for spec in model:
+        rq1 = _with_classifier(study, spec).rq1
+        models.append((rq1.provider, rq1.classify_model))
+    if models[0] == models[1]:
+        raise typer.BadParameter("the two models must differ", param_hint="--model")
+    _, output_dir = _rq1_dirs(settings, gold)
+    _print(
+        compare_models(
+            output_dir,
+            codebook_path=codebook or study.rq1.codebook,
+            models=models,
+            human=human,
         )
     )
 

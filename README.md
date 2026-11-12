@@ -500,6 +500,7 @@ poetry run agm rq1 saturation        # amostra nova: quantas seções não cabem
 poetry run agm rq1 validate export   # planilha cega para rotular à mão
 poetry run agm rq1 validate llm      # rótulos do LLM na amostra de validação (--replicate 2)
 poetry run agm rq1 validate score    # concordância humano × LLM e LLM × LLM (--human planilha.csv)
+poetry run agm rq1 compare --model A --model B   # dois classificadores comparados (provedor:modelo)
 ```
 
 ### Criação dos labels
@@ -562,7 +563,38 @@ versão (`propose-v2`, `induce-v1`, `align-v1`, `map-v1`): mudar o texto de um p
      precisão, revocação e F1, com médias e intervalos de confiança de 95% por bootstrap, para
      humano × LLM, LLM × LLM e, com `--retest`, humano × humano (você rotula de novo parte da
      planilha depois de alguns dias). Sem `--human`, mede só a estabilidade. Saídas:
-     `scores.json` e `scores.md`.
+     `scores.json` e `scores.md`, na pasta do modelo (`validation/<codebook>/llm/<provedor>/
+     <modelo>/`), ao lado dos rótulos dele; o score de um modelo nunca apaga o de outro.
+
+### Comparar dois modelos
+
+`classify`, `saturation`, `validate llm` e `validate score` aceitam `--model provedor:modelo`
+(por exemplo `--model gemini:gemini-3.5-flash-lite`), que troca `rq1.provider` e
+`rq1.classify_model` só naquela execução, sem outro `study.yaml`. A troca fica registrada no
+manifesto de cada saída. As respostas e as saídas de cada modelo ficam em pastas separadas.
+
+```bash
+# Modelo A: o do study.yaml; modelo B: outro, de outra família
+poetry run agm rq1 validate llm
+poetry run agm rq1 validate llm --model gemini:gemini-3.5-flash-lite
+poetry run agm rq1 classify
+poetry run agm rq1 classify --model gemini:gemini-3.5-flash-lite
+
+poetry run agm rq1 compare --model anthropic:claude-sonnet-5-5 \
+  --model gemini:gemini-3.5-flash-lite --human planilha.csv
+```
+
+O `compare` usa o que existir para os dois modelos:
+
+- **amostra de validação** (`validate llm --model`): humano × A e humano × B (com `--human`) e
+  A × B, com kappa, precisão, revocação e F1 por categoria e intervalos de confiança;
+- **todas as seções** (`classify --model`): A × B sobre todas as seções (sem bootstrap: com
+  milhares de seções os intervalos seriam mínimos) e as prevalências dos dois lado a lado, por
+  ferramenta, tipo de arquivo e categoria, com a diferença (`prevalence.parquet`). Ela mostra se as
+  conclusões da RQ1 dependem do modelo.
+
+Saídas em `compare/<codebook>/<A>__vs__<B>/`: `compare.json`, `compare.md` e
+`prevalence.parquet`. O A é sempre o primeiro `--model`.
 
 ### Validação externa com o dataset do *Agent READMEs*
 

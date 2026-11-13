@@ -5,8 +5,9 @@ The paper released 2,303 context files (``hao-li/AgentREADMEs`` on Hugging Face:
 (``woraamy/Agent-Context-File-Analysis``), the labels its authors gave 332 of them by hand with
 their 16-label taxonomy, plus the labels GPT-5 gave the same files.
 
-``import_agentreadmes`` turns the dataset into an analysis-like output (``rq1_sections`` and an
-``analysis_manifest.json``), so every ``agm rq1`` command runs on it with ``--gold``. The
+``import_agentreadmes`` turns the dataset into an analysis-like output (``rq1_sections``,
+``rq2_structure`` and an ``analysis_manifest.json``), so every ``agm rq1`` command runs on it with
+``--gold`` and the RQ2 metrics of our sample can be compared with the paper's files. The
 reference labels are mapped onto ``codebooks/seed_agent_readmes.yaml``. ``score_agentreadmes``
 then compares, file by file, our classification (with that codebook) with the human labels, next
 to GPT-5 as the paper's baseline.
@@ -28,9 +29,16 @@ from typing import Any
 
 import polars as pl
 
-from agm_miner.analysis.datasets import ANALYSIS_MANIFEST, SECTIONS_SCHEMA, document_section_rows
+from agm_miner.analysis.datasets import (
+    ANALYSIS_MANIFEST,
+    METRICS_SCHEMA,
+    SECTIONS_SCHEMA,
+    build_rq2_structure,
+    document_section_rows,
+)
 from agm_miner.analysis.markdown import parse_document
-from agm_miner.config import Rq1Config
+from agm_miner.analysis.metrics import compute_metrics
+from agm_miner.config import AnalysisConfig, Rq1Config
 from agm_miner.rq1.agreement import agreement
 from agm_miner.rq1.codebook import OTHER, load_codebook
 from agm_miner.rq1.stages import _codebook_slug, _write_manifest, model_slug
@@ -40,6 +48,7 @@ from agm_miner.runs import code_version
 
 FILES = "files.parquet"
 REFERENCE_LABELS = "reference_labels.parquet"
+RQ2_STRUCTURE = "rq2_structure.parquet"
 HUMAN, GPT5 = "human", "gpt-5"
 
 # The dataset's `agent` column -> our tool names (COPILOT is not mined by this study).
@@ -161,8 +170,16 @@ def build_sections(files: pl.DataFrame) -> pl.DataFrame:
             )
         )
     sections = pl.DataFrame(rows, schema=SECTIONS_SCHEMA)
-    attributes = files.select(
+    return sections.join(
+        _attributes(files).select(pl.exclude("repo_id")), on="artifact_id", how="inner"
+    ).sort("repo_id", "artifact_id", "position")
+
+
+def _attributes(files: pl.DataFrame) -> pl.DataFrame:
+    """Artifact attributes of every file, as ``agm analyze`` gives them to mined artifacts."""
+    return files.select(
         pl.col("artifact_id"),
+        "repo_id",
         "full_name",
         "path",
         "tool",
@@ -173,9 +190,56 @@ def build_sections(files: pl.DataFrame) -> pl.DataFrame:
         .alias("scope"),
         pl.lit(None, dtype=pl.Utf8).alias("skill_name"),
     )
-    return sections.join(attributes, on="artifact_id", how="inner").sort(
-        "repo_id", "artifact_id", "position"
+
+
+def git_blob_sha(content: str) -> str:
+    """The id git gives this content as a blob (``git hash-object``)."""
+    data = content.encode("utf-8")
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def build_structure(files: pl.DataFrame, config: AnalysisConfig) -> pl.DataFrame:
+    """``rq2_structure`` of every file, built by the same function and metrics as the one
+    ``agm analyze`` writes for the mined artifacts at HEAD (same columns and types). Each file is
+    an artifact whose only version is its content (``version_id`` = ``artifact_id``). Nothing is
+    filtered: the study sample's ``min_artifact_bytes`` can be applied on ``size_bytes``."""
+    contents = files["content"].fill_null("").to_list()
+    attributes = _attributes(files).with_columns(
+        pl.Series("head_blob_sha", [git_blob_sha(content) for content in contents]),
+        pl.Series("size_bytes", [len(content.encode("utf-8")) for content in contents]),
     )
+    tables = {
+        "artifacts": attributes.select(
+            pl.col("artifact_id").alias("id"),
+            "repo_id",
+            "path",
+            "tool",
+            "kind",
+            "scope",
+            "skill_name",
+            pl.lit(True).alias("exists_at_head"),
+            "head_blob_sha",
+        ),
+        "artifact_versions": attributes.select(
+            pl.col("artifact_id").alias("id"),
+            "artifact_id",
+            pl.col("head_blob_sha").alias("blob_sha"),
+            pl.lit(False).alias("is_symlink"),
+            pl.col("size_bytes").cast(pl.Int64),
+            pl.lit(None, dtype=pl.Utf8).alias("content_omitted"),
+        ),
+        "repositories": attributes.select(pl.col("repo_id").alias("id"), "full_name").unique(),
+    }
+    rows = []
+    for file, content in zip(files.iter_rows(named=True), contents, strict=True):
+        metrics, _ = compute_metrics(content, config.min_chars_for_language)
+        ids = {
+            "version_id": file["artifact_id"],
+            "artifact_id": file["artifact_id"],
+            "repo_id": file["repo_id"],
+        }
+        rows.append(ids | metrics.as_row())
+    return build_rq2_structure(tables, pl.DataFrame(rows, schema=METRICS_SCHEMA))
 
 
 def _map_labels(values: Sequence[str], mapping: Mapping[str, str], source: str) -> list[str]:
@@ -267,10 +331,13 @@ def import_agentreadmes(
     human_path: Path | None = None,
     gpt5_path: Path | None = None,
     force: bool = False,
+    analysis: AnalysisConfig | None = None,
 ) -> dict[str, Any]:
-    """Write ``output_dir`` (``rq1_sections``, ``files``, ``reference_labels`` and the
-    manifest) from the dataset Parquet and, optionally, the paper's label CSVs. Written into a
-    ``.partial`` folder and renamed at the end, like ``agm analyze``."""
+    """Write ``output_dir`` (``rq1_sections``, ``rq2_structure``, ``files``,
+    ``reference_labels`` and the manifest) from the dataset Parquet and, optionally, the paper's
+    label CSVs. Written into a ``.partial`` folder and renamed at the end, like ``agm analyze``.
+    ``analysis`` is the study's analysis configuration (the RQ2 metrics depend on it)."""
+    analysis = analysis or AnalysisConfig()
     if gpt5_path is not None and human_path is None:
         raise AgentReadmesError("the GPT-5 labels are matched through the human labels' row ids")
     if output_dir.exists() and not force:
@@ -278,6 +345,7 @@ def import_agentreadmes(
 
     files = build_files(pl.read_parquet(dataset_path))
     sections = build_sections(files)
+    structure = build_structure(files, analysis)
     with_text = build_units(sections)
     files = files.join(
         with_text.group_by("artifact_id").agg(pl.len().cast(pl.Int64).alias("sections")),
@@ -292,7 +360,11 @@ def import_agentreadmes(
             files = files.with_columns(pl.lit(None, dtype=dtype).alias(column))
     files = files.select([pl.col(c).cast(t) for c, t in _FILES_SCHEMA.items()])
 
-    outputs: dict[str, pl.DataFrame] = {RQ1_SECTIONS: sections, FILES: files}
+    outputs: dict[str, pl.DataFrame] = {
+        RQ1_SECTIONS: sections,
+        RQ2_STRUCTURE: structure,
+        FILES: files,
+    }
     inputs = {"dataset": dataset_path}
     reference_summary: dict[str, Any] = {}
     if human_path is not None:
@@ -335,6 +407,7 @@ def import_agentreadmes(
         "inputs": {
             name: {"path": str(path), "sha256": _sha256(path)} for name, path in inputs.items()
         },
+        "analysis_config": analysis.model_dump(mode="json"),
         "outputs": {name.removesuffix(".parquet"): frame.height for name, frame in outputs.items()},
         **summary,
     }

@@ -11,8 +11,10 @@ import polars as pl
 import pytest
 from typer.testing import CliRunner
 
+from agm_miner.analysis.datasets import METRICS_SCHEMA
+from agm_miner.analysis.metrics import compute_metrics
 from agm_miner.cli import app
-from agm_miner.config import Rq1Config
+from agm_miner.config import AnalysisConfig, Rq1Config
 from agm_miner.rq1.agentreadmes import (
     GPT5,
     HUMAN,
@@ -20,6 +22,8 @@ from agm_miner.rq1.agentreadmes import (
     OutputExistsError,
     build_files,
     build_sections,
+    build_structure,
+    git_blob_sha,
     import_agentreadmes,
     labelled_artifact_ids,
     parse_gpt5_labels,
@@ -182,6 +186,59 @@ def test_reference_labels_map_onto_the_seed_codebook() -> None:
     assert set(HUMAN_LABELS.values()) == seed and set(GPT5_LABELS.values()) == seed
 
 
+# Columns of the rq2_structure that `agm analyze` writes: the artifact at HEAD, its version, then
+# the metrics (analysis.datasets.build_rq2_structure).
+HEAD_COLUMNS = [
+    "artifact_id",
+    "repo_id",
+    "path",
+    "tool",
+    "kind",
+    "scope",
+    "skill_name",
+    "exists_at_head",
+    "head_blob_sha",
+    "version_id",
+    "is_symlink",
+    "size_bytes",
+    "content_omitted",
+    "full_name",
+]
+
+
+def test_git_blob_sha_is_the_id_git_gives_the_content() -> None:
+    assert git_blob_sha("") == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    assert git_blob_sha("hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
+
+
+def test_structure_has_the_analysis_columns_and_metrics() -> None:
+    files = build_files(dataset())
+    structure = build_structure(files, AnalysisConfig())
+
+    ids = ("version_id", "artifact_id", "repo_id")
+    metric_columns = [c for c in METRICS_SCHEMA if c not in ids]
+    assert structure.columns == HEAD_COLUMNS + metric_columns
+    assert all(structure.schema[c] == METRICS_SCHEMA[c] for c in metric_columns)
+    assert structure.height == len(FILES)
+    assert structure["version_id"].to_list() == structure["artifact_id"].to_list()
+    assert structure["exists_at_head"].all() and not structure["is_symlink"].any()
+
+    first = structure.filter(pl.col("full_name") == "a/one").row(0, named=True)
+    content = FILES[0][3]
+    expected, _ = compute_metrics(content)
+    assert {c: first[c] for c in metric_columns} == expected.as_row()
+    assert (first["headings"], first["h1"], first["h2"]) == (3, 1, 2)
+    assert first["size_bytes"] == len(content.encode()) and first["kind"] == "INSTRUCTION"
+    assert first["head_blob_sha"] == git_blob_sha(content)
+    nested = structure.filter(pl.col("path") == "docs/AGENTS.md")
+    assert nested["scope"].item() == "NESTED" and nested["tool"].item() == "AGENTS"
+
+    # The analysis configuration reaches the metrics: language needs enough prose.
+    assert structure["language"].is_null().all()  # every fixture is under 200 characters
+    eager = build_structure(files, AnalysisConfig(min_chars_for_language=1))
+    assert eager["language"].is_not_null().any()
+
+
 def test_import_writes_an_analysis_like_output(tmp_path: Path) -> None:
     data, human, gpt5 = write_inputs(tmp_path)
     output = tmp_path / "external" / "agentreadmes"
@@ -200,6 +257,10 @@ def test_import_writes_an_analysis_like_output(tmp_path: Path) -> None:
     manifest = json.loads((output / "analysis_manifest.json").read_text())
     assert set(manifest["inputs"]) == {"dataset", "human_labels", "gpt5_labels"}
     assert len(manifest["inputs"]["dataset"]["sha256"]) == 64
+    assert manifest["outputs"]["rq2_structure"] == 5
+    assert manifest["analysis_config"] == AnalysisConfig().model_dump(mode="json")
+    structure = pl.read_parquet(output / "rq2_structure.parquet")
+    assert structure.columns[: len(HEAD_COLUMNS)] == HEAD_COLUMNS and structure.height == 5
     reference = pl.read_parquet(output / "reference_labels.parquet")
     assert set(reference["rater"]) == {HUMAN, GPT5} and reference.height == 12
     files = pl.read_parquet(output / "files.parquet")
@@ -210,6 +271,10 @@ def test_import_writes_an_analysis_like_output(tmp_path: Path) -> None:
         import_agentreadmes(data, output)
     assert import_agentreadmes(data, output, force=True)["files"] == 5
     assert not (output / "reference_labels.parquet").exists()  # replaced without labels
+    import_agentreadmes(data, output, force=True, analysis=AnalysisConfig(min_chars_for_language=1))
+    manifest = json.loads((output / "analysis_manifest.json").read_text())
+    assert manifest["analysis_config"]["min_chars_for_language"] == 1
+    assert pl.read_parquet(output / "rq2_structure.parquet")["language"].is_not_null().any()
     with pytest.raises(AgentReadmesError, match="row ids"):
         import_agentreadmes(data, tmp_path / "other", gpt5_path=gpt5)
 
@@ -340,6 +405,7 @@ def test_agentreadmes_commands(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0, result.output
     summary = json.loads(result.output[result.output.index("{") :])
     assert summary["output"] == str(tmp_path / "data" / "external" / "agentreadmes")
+    assert (Path(summary["output"]) / "rq2_structure.parquet").exists()
 
     again = runner.invoke(app, ["rq1", "agentreadmes", "import", str(data)])
     assert again.exit_code == 1 and "--force" in again.output

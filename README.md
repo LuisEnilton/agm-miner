@@ -645,7 +645,10 @@ poetry run agm rq1 agentreadmes score --codebook codebooks/agent_readmes_enriche
 ```
 
 - **O que a importação grava** (`data/external/agentreadmes/`): `rq1_sections.parquet`, com os
-  arquivos quebrados em seções pelo mesmo parser do `analyze`; `files.parquet`, com URL e
+  arquivos quebrados em seções pelo mesmo parser do `analyze`; `rq2_structure.parquet`, com as
+  métricas da RQ2 de cada arquivo, nas mesmas colunas e tipos da tabela gold do `analyze` (cada
+  arquivo é um artefato cuja única versão é o seu conteúdo, `head_blob_sha` é o id de blob do
+  git e o `--study` define a configuração de análise); `files.parquet`, com URL e
   metadados de cada arquivo; `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos
   ids do `seed_agent_readmes.yaml`; e um `analysis_manifest.json` com o SHA-256 de cada fonte. Os
   ids são derivados do conteúdo (URLs e nomes ordenados), então a mesma fonte gera sempre os
@@ -668,6 +671,11 @@ poetry run agm rq1 agentreadmes score --codebook codebooks/agent_readmes_enriche
 - **Conferência da correspondência dos rótulos:** com os 332 arquivos, o `agreement` deste projeto
   aplicado a humano × GPT-5 reproduz o relatório do artigo (precisão micro 0,7326, revocação micro
   0,8632, F1 micro 0,7925 e F1 macro 0,7270).
+- **RQ2 no dataset do artigo:** o `rq2_structure.parquet` da importação permite comparar a
+  estrutura dos nossos arquivos com a dos arquivos do artigo usando o mesmo código. Nada é
+  filtrado: para usar o critério de tamanho da nossa amostra, filtre `size_bytes >=
+  analysis.min_artifact_bytes`. O critério de autores humanos não se aplica, porque o dataset
+  não traz o histórico; pelo mesmo motivo não há RQ3 nele, nem Skills.
 - Saídas em `DATA_DIR/rq1/agentreadmes/agentreadmes/<codebook>/<provedor>/<modelo>/`:
   `scores.json`, `scores.md` e o manifesto (ou `scores-AGENTS-CLAUDE.*` com `--tool`).
 - O dataset e o pacote de replicação não declaram licença: cite o artigo e não redistribua os

@@ -123,7 +123,7 @@ def build_version_tables(
             document_section_rows(document, row["id"], row["artifact_id"], row["repo_id"])
         )
 
-    metrics_frame = pl.DataFrame(metric_rows, schema=_METRICS_SCHEMA)
+    metrics_frame = pl.DataFrame(metric_rows, schema=METRICS_SCHEMA)
     sections_frame = pl.DataFrame(section_rows, schema=SECTIONS_SCHEMA)
     return metrics_frame, sections_frame, documents
 
@@ -151,7 +151,7 @@ def document_section_rows(
     ]
 
 
-_METRICS_SCHEMA = {
+METRICS_SCHEMA = {
     "version_id": pl.Int64,
     "artifact_id": pl.Int64,
     "repo_id": pl.Int64,

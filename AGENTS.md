@@ -186,7 +186,9 @@ falha se a migração divergir dos modelos.
 - Validação externa (`rq1/agentreadmes.py`): `agm rq1 agentreadmes import` grava o dataset do
   *Agent READMEs* em `DATA_DIR/external/agentreadmes/` no formato da saída do `analyze`
   (`rq1_sections` + `analysis_manifest.json`), então todos os comandos da RQ1 rodam nele com
-  `--gold`. Os rótulos do artigo são mapeados por tabela explícita para o
+  `--gold`. Também grava `rq2_structure`, montado pelo próprio `build_rq2_structure` (mesmas
+  colunas e tipos da tabela gold; `version_id` = `artifact_id`), para comparar a RQ2 com os
+  arquivos do artigo. Os rótulos do artigo são mapeados por tabela explícita para o
   `seed_agent_readmes.yaml`; um rótulo desconhecido faz a importação falhar. O `score` agrega as
   categorias das seções por arquivo e compara com os rótulos humanos, com o GPT-5 como linha de
   base. Nada é filtrado na importação (o `COPILOT` fica); `--tool` filtra no score e

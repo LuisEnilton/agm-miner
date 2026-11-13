@@ -947,12 +947,14 @@ def rq1_agentreadmes_import(
         typer.Option(help="Output folder (default: DATA_DIR/external/agentreadmes)."),
     ] = None,
     force: Annotated[bool, typer.Option(help="Replace an existing output.")] = False,
+    study_path: StudyOption = None,
 ) -> None:
-    """Import the Agent READMEs files (and the paper's labels) as an analysis output; then run
+    """Import the Agent READMEs files (and the paper's labels) as an analysis output, with the
+    RQ2 metrics of every file (rq2_structure); then run
     `agm rq1 classify --gold <output> --codebook codebooks/seed_agent_readmes.yaml`."""
     from agm_miner.rq1.agentreadmes import import_agentreadmes
 
-    settings, _ = _context(None)
+    settings, study = _context(study_path)
     _print(
         import_agentreadmes(
             dataset,
@@ -960,6 +962,7 @@ def rq1_agentreadmes_import(
             human_path=human_labels,
             gpt5_path=gpt5_labels,
             force=force,
+            analysis=study.analysis,
         )
     )
 

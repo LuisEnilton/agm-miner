@@ -644,12 +644,32 @@ poetry run agm rq1 agentreadmes score --codebook codebooks/agent_readmes_enriche
   --model anthropic:claude-sonnet-5-5
 ```
 
+**Por seção × arquivo inteiro.** O artigo (e o GPT-5) rotula cada arquivo de uma vez; o nosso
+classificador rotula cada seção e une as categorias por arquivo. `--unit file` classifica o
+arquivo inteiro numa única requisição, com o mesmo codebook, modelo, effort e proteção contra
+injeção. Assim, cada comparação muda um fator só: Claude por arquivo × GPT-5 (o modelo) e Claude
+por arquivo × Claude por seção (a unidade).
+
+```bash
+poetry run agm rq1 classify --gold data/external/agentreadmes --unit file \
+  --codebook codebooks/seed_agent_readmes.yaml --only-labelled --model anthropic:claude-sonnet-5-5
+poetry run agm rq1 agentreadmes score --unit file --model anthropic:claude-sonnet-5-5
+```
+
+O resultado fica em `classify-file/<codebook>/<provedor>/<modelo>/file_labels.parquet` (uma
+linha por arquivo, com a lista de categorias) e o score em `scores-file.*`. Esse score traz também
+`section_vs_file`, a concordância entre as duas unidades do mesmo modelo, e
+`mean_categories`, a média de categorias por arquivo de cada rotulador. Arquivos idênticos geram
+uma requisição só. Precisa do `file_contents.parquet` da importação: importe de novo com
+`--force` um dataset importado antes dessa versão.
+
 - **O que a importação grava** (`data/external/agentreadmes/`): `rq1_sections.parquet`, com os
   arquivos quebrados em seções pelo mesmo parser do `analyze`; `rq2_structure.parquet`, com as
   métricas da RQ2 de cada arquivo, nas mesmas colunas e tipos da tabela gold do `analyze` (cada
   arquivo é um artefato cuja única versão é o seu conteúdo, `head_blob_sha` é o id de blob do
   git e o `--study` define a configuração de análise); `files.parquet`, com URL e
-  metadados de cada arquivo; `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos
+  metadados de cada arquivo; `file_contents.parquet`, com o conteúdo de cada arquivo (para
+  `--unit file`); `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos
   ids do `seed_agent_readmes.yaml`; e um `analysis_manifest.json` com o SHA-256 de cada fonte. Os
   ids são derivados do conteúdo (URLs e nomes ordenados), então a mesma fonte gera sempre os
   mesmos ids. Um rótulo que não está na tabela de correspondência faz a importação parar.
@@ -680,6 +700,38 @@ poetry run agm rq1 agentreadmes score --codebook codebooks/agent_readmes_enriche
   `scores.json`, `scores.md` e o manifesto (ou `scores-AGENTS-CLAUDE.*` com `--tool`).
 - O dataset e o pacote de replicação não declaram licença: cite o artigo e não redistribua os
   arquivos.
+
+## RQ2: estrutura dos artefatos
+
+`agm rq2 summary` lê só o `rq2_structure.parquet` de uma saída do `analyze` e grava
+`DATA_DIR/rq2/<gold>/rq2_summary.json` e `.md`. Os dados são agrupados por tipo de arquivo
+(`CLAUDE.md`, `AGENTS.md`, `SKILL.md`):
+
+- extensão (linhas, palavras, caracteres) em média e quartis, com faixas de palavras;
+- títulos, seções e profundidade máxima;
+- porcentagem de arquivos com cada elemento (bloco de código, tabela, listas, links...);
+- Flesch, só para os arquivos em inglês;
+- frontmatter das Skills: quantos são YAML válidos e a frequência das chaves.
+
+`--compare` resume outra saída com os mesmos filtros, lado a lado. Por exemplo, os arquivos do
+artigo *Agent READMEs*, onde o `COPILOT` fica de fora e o limite de tamanho é o mesmo
+(`--min-bytes`, padrão `analysis.min_artifact_bytes`):
+
+```bash
+poetry run agm rq2 summary --compare data/external/agentreadmes
+```
+
+Os dois datasets não têm a mesma população, então cada número sai em quatro recortes:
+
+- **todos os arquivos ou só os da raiz**: o artigo só tem arquivos da raiz, e boa parte dos
+  nossos é aninhada;
+- **por arquivo ou um arquivo por repositório**: no segundo, cada repositório conta com o arquivo
+  da raiz ou, sem ele, o de caminho mais raso, para um monorepo com dezenas de arquivos não pesar
+  mais.
+
+A tabela "por faixa de tamanho" mostra se uma diferença (por exemplo, menos blocos de código)
+vem de arquivos menores ou de outro jeito de escrever. `code_blocks` conta blocos cercados e
+indentados.
 
 ## Testes
 

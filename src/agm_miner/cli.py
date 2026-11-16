@@ -10,6 +10,7 @@ agm run                 run stages 1-3 in parallel until done, then 4 and 5
 agm status              what is running now and how far it got (also from another terminal)
 agm runs list|funnel    inspect pipeline runs and the selection funnel
 agm rq1 ...             RQ1 content coding with an LLM (sample, propose, classify, validate)
+agm rq2 summary         RQ2 structure tables, optionally next to another dataset
 agm help [COMMAND...]   list every command and what it does
 """
 
@@ -23,6 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any, ParamSpec, TypeVar
 
+import click
 import typer
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -55,6 +57,8 @@ rq1_agentreadmes_app = typer.Typer(
     help="External validation on the Agent READMEs dataset (import, score).",
 )
 rq1_app.add_typer(rq1_agentreadmes_app, name="agentreadmes")
+rq2_app = typer.Typer(no_args_is_help=True, help="RQ2 structure: summary tables of rq2_structure.")
+app.add_typer(rq2_app, name="rq2")
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -742,6 +746,16 @@ ModelOption = Annotated[
 ]
 
 
+UnitOption = Annotated[
+    str,
+    typer.Option(
+        click_type=click.Choice(["section", "file"]),
+        help="Classify each section (section) or each whole file in one request (file, the "
+        "Agent READMEs paper's strategy; needs a dataset imported with its file contents).",
+    ),
+]
+
+
 def _with_model(study: StudyConfig, model: str | None, phase: str = "classify") -> StudyConfig:
     """``study`` with the ``--model`` model for ``phase`` (recorded in every manifest's
     rq1_config)."""
@@ -789,20 +803,23 @@ def rq1_classify(
             "as Agent READMEs): what `agentreadmes score` needs, for a fraction of the cost."
         ),
     ] = False,
+    unit: UnitOption = "section",
     model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
-    """Categories of every section with text (rq1.classify_model), file by file. Cached and
-    resumable: run it again after an interruption or a daily limit."""
+    """Categories of every section with text (rq1.classify_model), file by file; with --unit
+    file, of every whole file, one request per file. Cached and resumable: run it again after an
+    interruption or a daily limit."""
     from agm_miner.rq1.agentreadmes import labelled_artifact_ids
-    from agm_miner.rq1.stages import classify_sections
+    from agm_miner.rq1.stages import classify_files, classify_sections
 
+    classify = classify_sections if unit == "section" else classify_files
     _rq1_backend_run(
         "RQ1 CLASSIFY",
         "classify",
         study_path,
         gold,
-        lambda gold_dir, output_dir, study, backend, progress: classify_sections(
+        lambda gold_dir, output_dir, study, backend, progress: classify(
             gold_dir,
             output_dir,
             study.rq1,
@@ -1031,11 +1048,13 @@ def rq1_agentreadmes_score(
         list[str] | None,
         typer.Option("--tool", help="Score only this tool (CLAUDE, AGENTS, COPILOT); repeatable."),
     ] = None,
+    unit: UnitOption = "section",
     model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """File-level agreement of the classification with the paper's human labels, next to GPT-5,
-    overall and per tool (model: --model, or rq1.provider and rq1.classify_model)."""
+    overall and per tool (model: --model, or rq1.provider and rq1.classify_model). With --unit
+    file, also compares the whole-file and the per-section classification of the model."""
     from agm_miner.rq1.agentreadmes import score_agentreadmes
 
     settings, study = _context(study_path)
@@ -1050,6 +1069,50 @@ def rq1_agentreadmes_score(
             provider=study.rq1.provider,
             model=study.rq1.classify_model,
             tools=tool,
+            unit=unit,
+        )
+    )
+
+
+@rq2_app.command("summary")
+@_handle_errors
+def rq2_summary(
+    gold: Annotated[
+        Path | None,
+        typer.Option(help="Analysis output to summarise (default: the latest in DATA_DIR/gold)."),
+    ] = None,
+    compare: Annotated[
+        Path | None,
+        typer.Option(
+            help="Another analysis output summarised with the same filters, side by side "
+            "(e.g. DATA_DIR/external/agentreadmes, the Agent READMEs paper's files)."
+        ),
+    ] = None,
+    min_bytes: Annotated[
+        int | None,
+        typer.Option(help="Smallest file kept (default: analysis.min_artifact_bytes)."),
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Size, headings, elements, readability and SKILL.md frontmatter per file type, for all
+    files and root files only, per file and one file per repository. Written to
+    DATA_DIR/rq2/<gold name>/ (rq2_summary.json and .md)."""
+    from agm_miner.analysis.datasets import latest_analysis
+    from agm_miner.analysis.rq2_summary import write_summary
+    from agm_miner.runs import code_version
+
+    settings, study = _context(study_path)
+    gold_dir = gold or latest_analysis(settings.gold_dir)
+    output_dir = settings.data_dir / "rq2" / gold_dir.name
+    if compare is not None:
+        output_dir = output_dir.with_name(f"{gold_dir.name}__vs__{compare.name}")
+    _print(
+        write_summary(
+            gold_dir,
+            output_dir,
+            min_bytes=study.analysis.min_artifact_bytes if min_bytes is None else min_bytes,
+            compare_dir=compare,
+            code_version=code_version(),
         )
     )
 

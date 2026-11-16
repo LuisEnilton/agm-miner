@@ -33,7 +33,8 @@ from agm_miner.rq1.agentreadmes import (
 from agm_miner.rq1.backends import PromptRequest
 from agm_miner.rq1.codebook import load_codebook
 from agm_miner.rq1.llm import LLMResult
-from agm_miner.rq1.stages import classify_sections
+from agm_miner.rq1.stages import classify_files, classify_sections
+from agm_miner.rq1.units import load_file_contents
 from tests.test_rq1_labels import FakeBackend
 
 SEED = Path(__file__).resolve().parents[1] / "codebooks" / "seed_agent_readmes.yaml"
@@ -290,6 +291,15 @@ class HeadingBackend(FakeBackend):
 
     def answer(self, request: PromptRequest) -> LLMResult:
         self.asked.append(request.custom_id)
+        if request.schema_name == "file_classification":
+            # Whole file: the categories of its headings, plus "documentation" for a/one (the
+            # file with a title), so the two units disagree on one label.
+            headings = re.findall(r"^#+ (.+)$", request.user, re.MULTILINE)
+            found = {self.CATEGORIES[h] for h in headings if h in self.CATEGORIES}
+            if "Proj" in headings:
+                found.add("documentation")
+            text = json.dumps({"categories": sorted(found) or ["other"]})
+            return LLMResult(request.custom_id, "succeeded", text=text, usage={"input_tokens": 1})
         answers = [
             {"id": short_id, "categories": [self.CATEGORIES.get(path.split(" > ")[-1], "other")]}
             for short_id, path in self._SECTION.findall(request.user)
@@ -369,6 +379,134 @@ def test_score_leaves_out_files_whose_classification_is_incomplete(tmp_path: Pat
     assert scores["files"] == 2 and scores["unclassified_files"] == 3
 
 
+def test_import_keeps_the_whole_files(tmp_path: Path) -> None:
+    gold, _, _ = imported(tmp_path)
+    contents = load_file_contents(gold)
+    assert contents.height == 5
+    assert set(contents.columns) >= {"artifact_id", "repo_id", "path", "tool", "kind", "content"}
+    one = contents.filter(pl.col("full_name") == "a/one").row(0, named=True)
+    assert one["content"] == FILES[0][3] and one["kind"] == "INSTRUCTION"
+    manifest = json.loads((gold / "analysis_manifest.json").read_text())
+    assert manifest["outputs"]["file_contents"] == 5
+    with pytest.raises(FileNotFoundError, match="--force"):
+        load_file_contents(tmp_path)
+
+
+def test_classify_whole_files_and_score_them_against_the_sections(tmp_path: Path) -> None:
+    gold, output, config = imported(tmp_path)
+    backend = HeadingBackend()
+    summary = classify_files(gold, output, config, backend, codebook_path=SEED)
+    assert summary["files"] == 5 and summary["files_without_content"] == 0
+    assert summary["requests_planned"] == len(backend.asked) == 5 and summary["coverage"] == 1.0
+    assert summary["prompt_version"] == "classify-file-v1"
+    labels = pl.read_parquet(Path(summary["output"]) / "file_labels.parquet")
+    by_name = dict(labels.select("full_name", "categories").iter_rows())
+    assert by_name["a/one"] == ["build_and_run", "documentation", "testing"]
+    assert by_name["d/four"] == ["other"]
+
+    again = HeadingBackend()
+    classify_files(gold, output, config, again, codebook_path=SEED)
+    assert again.asked == []  # everything from the cache
+
+    with pytest.raises(FileNotFoundError, match="--unit file"):
+        score_agentreadmes(
+            gold,
+            tmp_path / "empty",
+            config,
+            codebook_path=SEED,
+            provider="openrouter",
+            model="fake-model",
+            unit="file",
+        )
+
+    # Without a section classification, there is no section × file comparison.
+    alone = score_agentreadmes(
+        gold,
+        output,
+        config,
+        codebook_path=SEED,
+        provider="openrouter",
+        model="fake-model",
+        unit="file",
+    )
+    scores = json.loads(Path(alone["output"]).read_text())
+    assert "section_vs_file" not in scores and Path(alone["output"]).name == "scores-file.json"
+
+    classify_sections(gold, output, config, HeadingBackend(), codebook_path=SEED)
+    result = score_agentreadmes(
+        gold,
+        output,
+        config,
+        codebook_path=SEED,
+        provider="openrouter",
+        model="fake-model",
+        unit="file",
+    )
+    scores = json.loads(Path(result["output"]).read_text())
+    assert scores["unit"] == "file" and scores["files"] == 5 and scores["unclassified_files"] == 0
+    # Human: 6 labels; whole files: 3 + 1 + 1 + 0 + 1 = 6; agreeing: 4.
+    assert scores["human_vs_llm"]["micro_f1"] == pytest.approx(4 / 6)
+    # By section: 5 labels, all also found by the whole-file run (6 labels).
+    assert scores["section_vs_file"]["micro_f1"] == pytest.approx(10 / 11)
+    assert scores["mean_categories"] == {"human": 1.2, "llm": 1.2, "gpt5": 1.2}
+    assert "section_vs_file" in scores["by_tool"]["CLAUDE"]
+    report = (Path(result["output"]).parent / "scores-file.md").read_text()
+    assert "classified by file" in report and "by section × whole file" in report
+    assert (Path(result["output"]).parent / "scores-file.manifest.json").exists()
+
+    with pytest.raises(AgentReadmesError, match="unknown unit"):
+        score_agentreadmes(
+            gold,
+            output,
+            config,
+            codebook_path=SEED,
+            provider="openrouter",
+            model="fake-model",
+            unit="chapter",
+        )
+
+
+def test_whole_file_without_content_gets_no_category_and_no_request(tmp_path: Path) -> None:
+    gold, output, config = imported(tmp_path)
+    contents = pl.read_parquet(gold / "file_contents.parquet")
+    blank = pl.when(pl.col("full_name") == "e/five").then(pl.lit(" \n")).otherwise("content")
+    contents.with_columns(blank.alias("content")).write_parquet(gold / "file_contents.parquet")
+
+    backend = HeadingBackend()
+    summary = classify_files(gold, output, config, backend, codebook_path=SEED)
+    assert summary["files_without_content"] == 1 and summary["files_labelled"] == 5
+    assert summary["requests_planned"] == len(backend.asked) == 4
+    labels = pl.read_parquet(Path(summary["output"]) / "file_labels.parquet")
+    assert dict(labels.select("full_name", "categories").iter_rows())["e/five"] == []
+
+    # Scored as "no category" (human: none either), not left out as unclassified.
+    scores = score_agentreadmes(
+        gold,
+        output,
+        config,
+        codebook_path=SEED,
+        provider="openrouter",
+        model="fake-model",
+        unit="file",
+    )
+    assert scores["files"] == 5 and scores["unclassified_files"] == 0
+
+
+def test_whole_file_score_leaves_out_files_not_classified(tmp_path: Path) -> None:
+    gold, output, config = imported(tmp_path)
+    classify_files(gold, output, config, HeadingBackend(), codebook_path=SEED, limit=1)
+    scores = score_agentreadmes(
+        gold,
+        output,
+        config,
+        codebook_path=SEED,
+        provider="openrouter",
+        model="fake-model",
+        unit="file",
+    )
+    assert scores["files"] == 1 and scores["unclassified_files"] == 4
+
+
 def test_score_needs_the_seed_codebook_and_a_classification(tmp_path: Path) -> None:
     gold, output, config = imported(tmp_path)
     with pytest.raises(FileNotFoundError, match="agm rq1 classify"):
@@ -432,6 +570,24 @@ def test_agentreadmes_commands(tmp_path: Path, monkeypatch) -> None:
     )
     assert scored.exit_code == 0, scored.output
     assert json.loads(scored.output[scored.output.index("{") :])["files"] == 5
+
+    # --unit file: classify whole files, then score them (next to the sections).
+    monkeypatch.setattr("agm_miner.rq1.backends.make_backend", lambda *_: HeadingBackend())
+    model = ["--model", "openrouter:fake-model"]
+    classified = runner.invoke(
+        app,
+        ["rq1", "classify", "--gold", str(gold), "--codebook", str(SEED), "--unit", "file"] + model,
+    )
+    assert classified.exit_code == 0, classified.output
+    assert (output / "classify-file" / "agent_readmes_2025").exists()
+    by_file = runner.invoke(
+        app, ["rq1", "agentreadmes", "score", "--codebook", str(SEED), "--unit", "file"] + model
+    )
+    assert by_file.exit_code == 0, by_file.output
+    result = json.loads(by_file.output[by_file.output.index("{") :])
+    assert result["unit"] == "file" and "section_vs_file" in result
+    wrong = runner.invoke(app, ["rq1", "classify", "--unit", "chapter"])
+    assert wrong.exit_code != 0 and "chapter" in str(wrong.exception)
 
 
 def test_classify_only_the_labelled_files_then_everything_from_the_cache(tmp_path: Path) -> None:

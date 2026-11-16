@@ -7,6 +7,7 @@ Layout of that directory::
     propose/<provider>/<model>/proposals.*        free labels per sampled section
     consolidate/<provider>/<model>/               codebook.draft.yaml, label_map.parquet
     classify/<codebook>/<provider>/<model>/       section, artifact and repository labels
+    classify-file/<codebook>/<provider>/<model>/  labels of whole files (one request per file)
     saturation/<codebook>/<provider>/<model>/     classification of a fresh sample
     validation/<codebook>/                        blind sheet; llm/<provider>/<model>/ holds the
                                                   model's replicates and agreement scores
@@ -41,6 +42,8 @@ from agm_miner.rq1.prompts import (
     ALIGN_SCHEMA,
     ALIGN_SYSTEM,
     ALIGN_VERSION,
+    CLASSIFY_FILE_SCHEMA,
+    CLASSIFY_FILE_VERSION,
     CLASSIFY_SCHEMA,
     CLASSIFY_VERSION,
     INDUCE_SCHEMA,
@@ -53,15 +56,18 @@ from agm_miner.rq1.prompts import (
     PROPOSE_VERSION,
     InvalidAnswer,
     LabelGroup,
+    classify_file_system,
     classify_system,
     induce_system,
     normalise_label,
     parse_alignment,
     parse_classification,
+    parse_file_classification,
     parse_induction,
     parse_mapping,
     parse_proposals,
     render_alignment,
+    render_file,
     render_labels,
     render_mapping,
     render_sections,
@@ -70,7 +76,7 @@ from agm_miner.rq1.prompts import (
 )
 from agm_miner.rq1.sampling import stratified_sample
 from agm_miner.rq1.store import BatchState, FailureLog, ResponseCache, request_key, run_lock
-from agm_miner.rq1.units import load_units
+from agm_miner.rq1.units import load_file_contents, load_units
 from agm_miner.runs import code_version
 
 SAMPLE = "sample.parquet"
@@ -793,6 +799,148 @@ def _classify_sections(
         if labelled
         else None,
         "rows": {name: frame.height for name, frame in outputs.items()},
+        **report,
+    }
+    _write_manifest(destination / "classify.json", gold_dir, config, **summary)
+    return {"output": str(destination), **summary}
+
+
+FILE_LABELS = "file_labels.parquet"
+_FILE_LABELS_SCHEMA = {
+    "artifact_id": pl.Int64,
+    "repo_id": pl.Int64,
+    "full_name": pl.Utf8,
+    "path": pl.Utf8,
+    "tool": pl.Utf8,
+    "kind": pl.Utf8,
+    "categories": pl.List(pl.Utf8),
+}
+
+
+def file_labels_dir(output_dir: Path, codebook: Codebook, provider: str, model: str) -> Path:
+    return output_dir / "classify-file" / _codebook_slug(codebook) / provider / model_slug(model)
+
+
+def classify_files(
+    gold_dir: Path,
+    output_dir: Path,
+    config: Rq1Config,
+    backend: LLMBackend,
+    *,
+    codebook_path: Path,
+    limit: int | None = None,
+    artifact_ids: Collection[int] | None = None,
+    progress: Progress | None = None,
+) -> dict[str, Any]:
+    """Categories of every whole file, one request per file (the strategy of the Agent READMEs
+    paper), to measure what classifying by section changes. Needs ``file_contents.parquet``
+    in ``gold_dir``. A file without content gets no category and no request."""
+    with run_lock(output_dir):
+        return _classify_files(
+            gold_dir,
+            output_dir,
+            config,
+            backend,
+            codebook_path,
+            limit,
+            artifact_ids,
+            progress or Progress(),
+        )
+
+
+def _classify_files(
+    gold_dir: Path,
+    output_dir: Path,
+    config: Rq1Config,
+    backend: LLMBackend,
+    codebook_path: Path,
+    limit: int | None,
+    artifact_ids: Collection[int] | None,
+    progress: Progress,
+) -> dict[str, Any]:
+    codebook = load_codebook(codebook_path)
+    files = load_file_contents(gold_dir)
+    if artifact_ids is not None:
+        files = files.filter(pl.col("artifact_id").is_in(list(artifact_ids)))
+    rows = files.to_dicts()
+    with_content = [row for row in rows if row["content"].strip()]
+    selected = with_content if limit is None else with_content[:limit]
+    progress.set_phase(f"classifying {len(selected)} whole files with {backend.model}")
+
+    system = classify_file_system(codebook)
+    key_of: dict[int, str] = {}
+    prompts: dict[str, PromptRequest] = {}
+    for row in selected:
+        content_hash = hashlib.sha256(row["content"].encode("utf-8")).hexdigest()
+        key = request_key(
+            "classify-file",
+            CLASSIFY_FILE_VERSION,
+            backend.provider,
+            backend.model,
+            codebook.fingerprint(),
+            "",
+            content_hash,
+        )
+        key_of[row["artifact_id"]] = key
+        # Identical files are classified once.
+        prompts.setdefault(
+            key,
+            PromptRequest(
+                key,
+                system,
+                render_file(row),
+                CLASSIFY_FILE_SCHEMA,
+                config.classify_max_tokens,
+                "file_classification",
+            ),
+        )
+    answers, report = _run_requests(
+        backend,
+        list(prompts.values()),
+        output_dir,
+        config,
+        progress,
+        lambda _prompt, result: parse_file_classification(result.text, codebook),
+    )
+
+    labelled = []
+    for row in rows:
+        if not row["content"].strip():
+            categories: list[str] | None = []
+        else:
+            answer = answers.get(key_of.get(row["artifact_id"], ""))
+            categories = None if answer is None else list(answer)
+        if categories is not None:
+            labelled.append({k: row[k] for k in _FILE_LABELS_SCHEMA if k != "categories"})
+            labelled[-1]["categories"] = categories
+    frame = pl.DataFrame(labelled, schema=_FILE_LABELS_SCHEMA)
+    destination = file_labels_dir(output_dir, codebook, backend.provider, backend.model)
+    _write_parquet(frame, destination / FILE_LABELS)
+    with_answer = [cats for cats in frame["categories"].to_list() if cats]
+    summary = {
+        "provider": backend.provider,
+        "model": backend.model,
+        "prompt_version": CLASSIFY_FILE_VERSION,
+        "codebook": {
+            "path": str(codebook_path),
+            "label": codebook.label,
+            "fingerprint": codebook.fingerprint(),
+        },
+        "files": files.height,
+        "files_without_content": files.height - len(with_content),
+        "only_files": None if artifact_ids is None else len(set(artifact_ids)),
+        "requests_planned": len({key for key in key_of.values()}),
+        "limit": limit,
+        "files_labelled": frame.height,
+        "coverage": round(frame.height / files.height, 4) if files.height else 0.0,
+        "other_share": round(sum(1 for c in with_answer if c == [OTHER]) / len(with_answer), 4)
+        if with_answer
+        else None,
+        "mean_categories": round(
+            sum(len(set(c) - {OTHER}) for c in with_answer) / len(with_answer), 3
+        )
+        if with_answer
+        else None,
         **report,
     }
     _write_manifest(destination / "classify.json", gold_dir, config, **summary)

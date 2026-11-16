@@ -466,6 +466,32 @@ def test_classify_whole_files_and_score_them_against_the_sections(tmp_path: Path
         )
 
 
+def test_whole_file_without_content_gets_no_category_and_no_request(tmp_path: Path) -> None:
+    gold, output, config = imported(tmp_path)
+    contents = pl.read_parquet(gold / "file_contents.parquet")
+    blank = pl.when(pl.col("full_name") == "e/five").then(pl.lit(" \n")).otherwise("content")
+    contents.with_columns(blank.alias("content")).write_parquet(gold / "file_contents.parquet")
+
+    backend = HeadingBackend()
+    summary = classify_files(gold, output, config, backend, codebook_path=SEED)
+    assert summary["files_without_content"] == 1 and summary["files_labelled"] == 5
+    assert summary["requests_planned"] == len(backend.asked) == 4
+    labels = pl.read_parquet(Path(summary["output"]) / "file_labels.parquet")
+    assert dict(labels.select("full_name", "categories").iter_rows())["e/five"] == []
+
+    # Scored as "no category" (human: none either), not left out as unclassified.
+    scores = score_agentreadmes(
+        gold,
+        output,
+        config,
+        codebook_path=SEED,
+        provider="openrouter",
+        model="fake-model",
+        unit="file",
+    )
+    assert scores["files"] == 5 and scores["unclassified_files"] == 0
+
+
 def test_whole_file_score_leaves_out_files_not_classified(tmp_path: Path) -> None:
     gold, output, config = imported(tmp_path)
     classify_files(gold, output, config, HeadingBackend(), codebook_path=SEED, limit=1)

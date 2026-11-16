@@ -25,6 +25,8 @@ from typing import Any
 
 import polars as pl
 
+from agm_miner.analysis.datasets import ANALYSIS_MANIFEST
+
 RQ2_STRUCTURE = "rq2_structure.parquet"
 SUMMARY_JSON, SUMMARY_MD = "rq2_summary.json", "rq2_summary.md"
 
@@ -315,6 +317,10 @@ def summary_markdown(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _manifest(directory: Path) -> dict[str, Any]:
+    return json.loads((directory / ANALYSIS_MANIFEST).read_text(encoding="utf-8"))
+
+
 def write_summary(
     gold_dir: Path,
     output_dir: Path,
@@ -324,10 +330,14 @@ def write_summary(
     code_version: str | None = None,
 ) -> dict[str, Any]:
     """Write ``rq2_summary.json`` and ``rq2_summary.md`` into ``output_dir`` (through a
-    ``.partial`` folder renamed at the end)."""
+    ``.partial`` folder renamed at the end). The JSON embeds the ``analysis_manifest.json`` of
+    each dataset, as the RQ1 manifests do."""
     for directory in (gold_dir, compare_dir):
-        if directory is not None and not (directory / RQ2_STRUCTURE).exists():
-            raise FileNotFoundError(f"No {RQ2_STRUCTURE} in {directory}")
+        if directory is None:
+            continue
+        for name in (RQ2_STRUCTURE, ANALYSIS_MANIFEST):
+            if not (directory / name).exists():
+                raise FileNotFoundError(f"No {name} in {directory}")
     ours = summarize(pl.read_parquet(gold_dir / RQ2_STRUCTURE), min_bytes=min_bytes)
     theirs = (
         summarize(pl.read_parquet(compare_dir / RQ2_STRUCTURE), min_bytes=min_bytes)
@@ -339,6 +349,10 @@ def write_summary(
         "code_version": code_version,
         "gold_dir": str(gold_dir),
         "compare_dir": None if compare_dir is None else str(compare_dir),
+        # Where each dataset came from (export, configuration and code of the analysis), so a
+        # table of the paper can be traced back to the export it was computed from.
+        "analysis_manifest": _manifest(gold_dir),
+        "compared_analysis_manifest": None if compare_dir is None else _manifest(compare_dir),
         "dataset": ours,
         "compared": theirs,
     }

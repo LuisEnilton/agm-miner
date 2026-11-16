@@ -150,13 +150,18 @@ def test_write_summary_and_command(tmp_path: Path, monkeypatch) -> None:
     for directory in (ours, theirs):
         directory.mkdir(parents=True)
     STRUCTURE.write_parquet(ours / "rq2_structure.parquet")
-    (ours / "analysis_manifest.json").write_text("{}")  # what `latest_analysis` looks for
+    (ours / "analysis_manifest.json").write_text('{"bronze_dir": "data/bronze/x"}')
     STRUCTURE.filter(pl.col("scope") == "ROOT").write_parquet(theirs / "rq2_structure.parquet")
+    with pytest.raises(FileNotFoundError, match="analysis_manifest"):
+        write_summary(ours, tmp_path / "out", min_bytes=2048, compare_dir=theirs)
+    (theirs / "analysis_manifest.json").write_text('{"source": "Agent READMEs"}')
 
     result = write_summary(ours, tmp_path / "out", min_bytes=2048, compare_dir=theirs)
     assert result["files"] == 5 and result["compared_files"] == 2
     summary = json.loads((tmp_path / "out" / "rq2_summary.json").read_text())
     assert summary["compared"]["cuts"]["all/files"]["AGENTS.md"]["files"] == 1
+    assert summary["analysis_manifest"] == {"bronze_dir": "data/bronze/x"}
+    assert summary["compared_analysis_manifest"] == {"source": "Agent READMEs"}
     report = (tmp_path / "out" / "rq2_summary.md").read_text()
     assert "## Cut: root/repositories" in report and "(compared, n=" in report
     assert "## SKILL.md frontmatter" in report and "| name | 100% |" in report

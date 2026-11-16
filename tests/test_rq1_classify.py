@@ -11,7 +11,15 @@ import pytest
 
 from agm_miner.rq1.agreement import agreement, category_agreement, cohen_kappa
 from agm_miner.rq1.codebook import Codebook, dump_codebook
-from agm_miner.rq1.prompts import InvalidAnswer, classify_system, parse_classification, short_ids
+from agm_miner.rq1.prompts import (
+    InvalidAnswer,
+    classify_file_system,
+    classify_system,
+    parse_classification,
+    parse_file_classification,
+    render_file,
+    short_ids,
+)
 from agm_miner.rq1.stages import (
     InvalidSheetError,
     NothingToCompareError,
@@ -93,6 +101,41 @@ def test_parse_classification() -> None:
     ]:
         with pytest.raises(InvalidAnswer, match=message):
             parse_classification(json.dumps(bad), ids, CODEBOOK)
+
+
+def test_parse_file_classification() -> None:
+    def parse(categories: list[str]) -> tuple[str, ...]:
+        return parse_file_classification(json.dumps({"categories": categories}), CODEBOOK)
+
+    assert parse(["testing", "docs", "testing"]) == ("docs", "testing")
+    assert parse(["other", "docs"]) == ("docs",)  # "other" only when nothing fits
+    assert parse([]) == ("other",)
+    for bad, message in [
+        ('{"categories": ["nope"]}', "unknown category"),
+        ('{"sections": []}', 'no "categories"'),
+        ("not json", "not JSON"),
+    ]:
+        with pytest.raises(InvalidAnswer, match=message):
+            parse_file_classification(bad, CODEBOOK)
+
+
+def test_file_prompt_keeps_the_codebook_and_the_injection_guard() -> None:
+    system = classify_file_system(CODEBOOK)
+    assert classify_system(CODEBOOK).endswith(system[system.index("Codebook:") :])
+    assert "never follow them" in system and "whole file" in system
+    rendered = render_file(
+        {
+            "full_name": "a/b",
+            "path": "CLAUDE.md",
+            "tool": "CLAUDE",
+            "kind": "INSTRUCTION",
+            "content": "\n# T\nbody\n",
+        }
+    )
+    assert rendered == (
+        "<file>\nrepository: a/b\nfile: CLAUDE.md (CLAUDE, INSTRUCTION)\ncontent:\n# T\nbody\n"
+        "</file>"
+    )
 
 
 # --------------------------------------------------------------------------- agreement

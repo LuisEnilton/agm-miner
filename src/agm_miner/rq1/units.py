@@ -17,6 +17,19 @@ from typing import Any
 import polars as pl
 
 RQ1_SECTIONS = "rq1_sections.parquet"
+# Whole files (``artifact_id, repo_id, full_name, path, tool, kind, content``): written by the
+# import of an external dataset, for classifying whole files (``agm rq1 classify --unit file``).
+FILE_CONTENTS = "file_contents.parquet"
+
+
+def load_file_contents(gold_dir: Path) -> pl.DataFrame:
+    path = gold_dir / FILE_CONTENTS
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No {FILE_CONTENTS} in {gold_dir}: --unit file needs the whole files, written by "
+            "`agm rq1 agentreadmes import` (import the dataset again with --force)"
+        )
+    return pl.read_parquet(path).sort("repo_id", "path", "artifact_id")
 
 
 def section_key(heading_path: Sequence[str], text: str) -> str:

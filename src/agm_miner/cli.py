@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any, ParamSpec, TypeVar
 
+import click
 import typer
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -742,6 +743,16 @@ ModelOption = Annotated[
 ]
 
 
+UnitOption = Annotated[
+    str,
+    typer.Option(
+        click_type=click.Choice(["section", "file"]),
+        help="Classify each section (section) or each whole file in one request (file, the "
+        "Agent READMEs paper's strategy; needs a dataset imported with its file contents).",
+    ),
+]
+
+
 def _with_model(study: StudyConfig, model: str | None, phase: str = "classify") -> StudyConfig:
     """``study`` with the ``--model`` model for ``phase`` (recorded in every manifest's
     rq1_config)."""
@@ -789,20 +800,23 @@ def rq1_classify(
             "as Agent READMEs): what `agentreadmes score` needs, for a fraction of the cost."
         ),
     ] = False,
+    unit: UnitOption = "section",
     model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
-    """Categories of every section with text (rq1.classify_model), file by file. Cached and
-    resumable: run it again after an interruption or a daily limit."""
+    """Categories of every section with text (rq1.classify_model), file by file; with --unit
+    file, of every whole file, one request per file. Cached and resumable: run it again after an
+    interruption or a daily limit."""
     from agm_miner.rq1.agentreadmes import labelled_artifact_ids
-    from agm_miner.rq1.stages import classify_sections
+    from agm_miner.rq1.stages import classify_files, classify_sections
 
+    classify = classify_sections if unit == "section" else classify_files
     _rq1_backend_run(
         "RQ1 CLASSIFY",
         "classify",
         study_path,
         gold,
-        lambda gold_dir, output_dir, study, backend, progress: classify_sections(
+        lambda gold_dir, output_dir, study, backend, progress: classify(
             gold_dir,
             output_dir,
             study.rq1,
@@ -1031,11 +1045,13 @@ def rq1_agentreadmes_score(
         list[str] | None,
         typer.Option("--tool", help="Score only this tool (CLAUDE, AGENTS, COPILOT); repeatable."),
     ] = None,
+    unit: UnitOption = "section",
     model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """File-level agreement of the classification with the paper's human labels, next to GPT-5,
-    overall and per tool (model: --model, or rq1.provider and rq1.classify_model)."""
+    overall and per tool (model: --model, or rq1.provider and rq1.classify_model). With --unit
+    file, also compares the whole-file and the per-section classification of the model."""
     from agm_miner.rq1.agentreadmes import score_agentreadmes
 
     settings, study = _context(study_path)
@@ -1050,6 +1066,7 @@ def rq1_agentreadmes_score(
             provider=study.rq1.provider,
             model=study.rq1.classify_model,
             tools=tool,
+            unit=unit,
         )
     )
 

@@ -644,12 +644,32 @@ poetry run agm rq1 agentreadmes score --codebook codebooks/agent_readmes_enriche
   --model anthropic:claude-sonnet-5-5
 ```
 
+**Por seção × arquivo inteiro.** O artigo (e o GPT-5) rotula cada arquivo de uma vez; o nosso
+classificador rotula cada seção e une as categorias por arquivo. `--unit file` classifica o
+arquivo inteiro numa única requisição, com o mesmo codebook, modelo, effort e proteção contra
+injeção. Assim, cada comparação muda um fator só: Claude por arquivo × GPT-5 (o modelo) e Claude
+por arquivo × Claude por seção (a unidade).
+
+```bash
+poetry run agm rq1 classify --gold data/external/agentreadmes --unit file \
+  --codebook codebooks/seed_agent_readmes.yaml --only-labelled --model anthropic:claude-sonnet-5-5
+poetry run agm rq1 agentreadmes score --unit file --model anthropic:claude-sonnet-5-5
+```
+
+O resultado fica em `classify-file/<codebook>/<provedor>/<modelo>/file_labels.parquet` (uma
+linha por arquivo, com a lista de categorias) e o score em `scores-file.*`. Esse score traz também
+`section_vs_file`, a concordância entre as duas unidades do mesmo modelo, e
+`mean_categories`, a média de categorias por arquivo de cada rotulador. Arquivos idênticos geram
+uma requisição só. Precisa do `file_contents.parquet` da importação: importe de novo com
+`--force` um dataset importado antes dessa versão.
+
 - **O que a importação grava** (`data/external/agentreadmes/`): `rq1_sections.parquet`, com os
   arquivos quebrados em seções pelo mesmo parser do `analyze`; `rq2_structure.parquet`, com as
   métricas da RQ2 de cada arquivo, nas mesmas colunas e tipos da tabela gold do `analyze` (cada
   arquivo é um artefato cuja única versão é o seu conteúdo, `head_blob_sha` é o id de blob do
   git e o `--study` define a configuração de análise); `files.parquet`, com URL e
-  metadados de cada arquivo; `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos
+  metadados de cada arquivo; `file_contents.parquet`, com o conteúdo de cada arquivo (para
+  `--unit file`); `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos
   ids do `seed_agent_readmes.yaml`; e um `analysis_manifest.json` com o SHA-256 de cada fonte. Os
   ids são derivados do conteúdo (URLs e nomes ordenados), então a mesma fonte gera sempre os
   mesmos ids. Um rótulo que não está na tabela de correspondência faz a importação parar.

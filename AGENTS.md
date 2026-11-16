@@ -194,6 +194,11 @@ falha se a migração divergir dos modelos.
   categorias das seções por arquivo e compara com os rótulos humanos, com o GPT-5 como linha de
   base. Nada é filtrado na importação (o `COPILOT` fica); `--tool` filtra no score e
   `classify --only-labelled` classifica só os arquivos com rótulos de referência.
+- `classify --unit file` (`stages.classify_files`, prompt `classify-file-v1`) classifica cada
+  arquivo inteiro numa requisição (estratégia do artigo), lendo o `file_contents.parquet` que só
+  a importação grava. A chave do cache usa o hash do conteúdo, e a saída fica em
+  `classify-file/`. `agentreadmes score --unit file` pontua essa saída e a compara com a
+  classificação por seção do mesmo modelo (`section_vs_file`).
 - Modelos, effort e tamanhos de amostra ficam em `rq1:` no `study.yaml`; o codebook curado fica em
   `codebooks/` (versionado). Testes usam SDKs/clientes falsos, nunca a API real.
 

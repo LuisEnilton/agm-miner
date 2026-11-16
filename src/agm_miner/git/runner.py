@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import signal
 import subprocess
 import threading
 from collections.abc import Iterable, Iterator
@@ -38,13 +39,27 @@ def _spawn(command: list[str], **kwargs) -> subprocess.Popen[bytes]:
     return process
 
 
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """Kill the whole process group of a git command (each one leads its own session).
+
+    ``git clone`` spawns ``index-pack`` and friends; killing only the leader leaves them
+    running with the output pipes open, so whoever reads the pipes would wait for them forever.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:  # pragma: no cover - the group is always ours
+        process.kill()
+
+
 def terminate_active_processes() -> int:
     """Kill every git process still running (used when a run is aborted); returns how many."""
     with _active_lock:
         running = [process for process in _active_processes if process.poll() is None]
         _active_processes.clear()
     for process in running:
-        process.kill()
+        _kill_group(process)
     return len(running)
 
 
@@ -113,7 +128,7 @@ class GitRunner:
         try:
             stdout, stderr = process.communicate(input=stdin, timeout=self.timeout_seconds)
         except subprocess.TimeoutExpired as exc:
-            process.kill()
+            _kill_group(process)
             process.communicate()
             raise GitTimeoutError(args, -1, f"timed out after {self.timeout_seconds}s") from exc
         if process.returncode != 0:
@@ -220,4 +235,4 @@ class _ManagedProcess:
     def _kill(self) -> None:
         if self.process.poll() is None:
             self._timed_out.set()
-            self.process.kill()
+        _kill_group(self.process)

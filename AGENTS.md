@@ -38,6 +38,7 @@ poetry run agm rq1 propose | consolidate   # RQ1: rótulos livres → rascunho d
 poetry run agm rq1 classify | saturation   # RQ1: categorias de todas as seções / cobertura
 poetry run agm rq1 validate export | llm | score   # RQ1: planilha cega, réplicas, kappa
 poetry run agm rq1 compare --model p:m --model p:m # RQ1: dois classificadores comparados
+poetry run agm rq2 summary [--compare DIR]  # RQ2: tabelas de estrutura (lado a lado com outro gold)
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
 poetry run ruff check . && poetry run ruff format .
@@ -63,7 +64,8 @@ src/agm_miner/
   git/                # runner (subprocess -z, streaming, timeout), parsing (puro), repository
   github/client.py    # REST code search + GraphQL, com pacing, quota por bucket e retry limitado
   stages/             # discovery, selection, mining (persistência + concorrência), export
-  analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets
+  analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets,
+                      # rq2_summary (tabelas da RQ2 a partir de rq2_structure; agm rq2 summary)
   rq1/                # RQ1 com LLM: units (section_key), sampling, codebook, llm (SDK anthropic,
                       # Batches), store (cache + estado dos lotes), execution (lotes retomáveis),
                       # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)

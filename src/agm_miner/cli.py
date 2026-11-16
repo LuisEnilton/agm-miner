@@ -10,12 +10,14 @@ agm run                 run stages 1-3 in parallel until done, then 4 and 5
 agm status              what is running now and how far it got (also from another terminal)
 agm runs list|funnel    inspect pipeline runs and the selection funnel
 agm rq1 ...             RQ1 content coding with an LLM (sample, propose, classify, validate)
+agm help [COMMAND...]   list every command and what it does
 """
 
 from __future__ import annotations
 
 import functools
 import json
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -438,6 +440,54 @@ def status(
                 live.update(render_status(*current()), refresh=True)
     except KeyboardInterrupt:
         return  # leaving --watch is not an interruption of any work
+
+
+def _summary(command: Any) -> str:
+    """First sentence of a command's help text."""
+    text = (command.help or command.short_help or "").strip()
+    paragraph = text.split("\n\n", 1)[0].replace("\n", " ").strip()
+    return re.split(r"(?<=[.])\s", paragraph, maxsplit=1)[0]
+
+
+def _command_lines(group: Any, prefix: str) -> list[tuple[str, str]]:
+    """(full name, summary) of every runnable command below ``group``, depth first."""
+    lines: list[tuple[str, str]] = []
+    for name in group.list_commands(None):
+        command = group.get_command(None, name)
+        if command is None or command.hidden:
+            continue
+        full = f"{prefix} {name}".strip()
+        if hasattr(command, "list_commands"):
+            lines.extend(_command_lines(command, full))
+        else:
+            lines.append((full, _summary(command)))
+    return lines
+
+
+@app.command("help")
+def help_command(
+    ctx: typer.Context,
+    command: Annotated[
+        list[str] | None,
+        typer.Argument(help="Show only the commands under this name (e.g. `rq1 validate`)."),
+    ] = None,
+) -> None:
+    """List every agm command and what it does (`agm help rq1` narrows it down)."""
+    root = ctx.find_root().command
+    group, prefix = root, ""
+    for word in command or []:
+        found = group.get_command(None, word) if hasattr(group, "list_commands") else None
+        if found is None:
+            raise typer.BadParameter(f"unknown command: {' '.join(command or [])}")
+        group, prefix = found, f"{prefix} {word}".strip()
+    if hasattr(group, "list_commands"):
+        lines = _command_lines(group, prefix)
+    else:
+        lines = [(prefix, _summary(group))]
+    width = max(len(name) for name, _ in lines)
+    for name, summary in lines:
+        typer.echo(f"agm {name.ljust(width)}  {summary}")
+    typer.echo("\nDetails of a command: agm <command> --help")
 
 
 @runs_app.command("list")

@@ -29,6 +29,7 @@ poetry run agm mine --workers 4     # 3. clone git parcial → commits, versões
 poetry run agm export               # 4. banco → data/bronze/<timestamp>/*.parquet + manifest.json
 poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silver + gold por RQ)
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
+poetry run agm help [comando...]    # lista todos os comandos e o que fazem
 poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
 poetry run agm runs cleanup         # RUNNING sem heartbeat há > --minutes vira INTERRUPTED

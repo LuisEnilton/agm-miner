@@ -484,7 +484,7 @@ def help_command(
         lines = _command_lines(group, prefix)
     else:
         lines = [(prefix, _summary(group))]
-    width = max(len(name) for name, _ in lines)
+    width = max((len(name) for name, _ in lines), default=0)
     for name, summary in lines:
         typer.echo(f"agm {name.ljust(width)}  {summary}")
     typer.echo("\nDetails of a command: agm <command> --help")

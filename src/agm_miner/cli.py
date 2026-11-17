@@ -6,6 +6,7 @@ agm add-repo NAME...    register repositories by name (validation runs)
 agm mine                mine selected repositories from git clones (stage 3)
 agm export              dump the database as a bronze Parquet dataset (stage 4)
 agm analyze             build silver/gold analysis datasets from a bronze export (stage 5)
+agm audit               sampling audit of a bronze export (coverage, filters, failures)
 agm run                 run stages 1-3 in parallel until done, then 4 and 5
 agm status              what is running now and how far it got (also from another terminal)
 agm runs list|funnel    inspect pipeline runs and the selection funnel
@@ -305,6 +306,29 @@ def analyze(
     with publishing(Progress("ANALYZE")) as progress, _showing_progress():
         counts = build_datasets(bronze_dir, output_dir, study.analysis, progress)
     _print({"output": str(output_dir), **counts})
+
+
+@app.command()
+@_handle_errors
+def audit(
+    bronze: Annotated[
+        Path | None, typer.Option(help="Bronze export directory (default: the latest one).")
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option(help="Output directory (default: DATA_DIR/audit/<export>).")
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Sampling audit of a bronze export: discovery coverage, selection effects, mining failures
+    and artifact coverage, with warnings (audit.json and audit.md; no database needed)."""
+    from agm_miner.analysis.sampling_audit import write_audit
+    from agm_miner.runs import code_version
+    from agm_miner.stages.export import latest_export
+
+    settings, study = _context(study_path)
+    bronze_dir = bronze or latest_export(settings.bronze_dir)
+    output_dir = output or settings.data_dir / "audit" / bronze_dir.name
+    _print(write_audit(bronze_dir, output_dir, study, code_version=code_version()))
 
 
 @app.command()

@@ -10,7 +10,15 @@ runner = CliRunner()
 def test_help_lists_every_command_with_its_summary() -> None:
     result = runner.invoke(app, ["help"])
     assert result.exit_code == 0, result.output
-    names = ("discover", "mine", "analyze", "runs funnel", "rq1 classify", "rq1 validate score")
+    names = (
+        "discover",
+        "mine",
+        "analyze",
+        "audit",
+        "runs funnel",
+        "rq1 classify",
+        "rq1 validate score",
+    )
     for name in names:
         assert f"agm {name} " in result.output
     assert "What is running now" in result.output

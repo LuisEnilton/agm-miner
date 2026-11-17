@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -118,6 +118,36 @@ class RepositoryMetadata:
             last_commit_at=_timestamp(target.get("committedDate")),
         )
 
+    @classmethod
+    def from_columns(cls, row: Mapping[str, Any]) -> RepositoryMetadata:
+        """Inverse of :meth:`as_columns`, from a ``repositories`` row (database or bronze).
+
+        ``is_empty`` is not stored; an empty repository has no default branch, which
+        :func:`failed_criteria` rejects as ``empty`` all the same."""
+        return cls(
+            database_id=int(row["id"]),
+            node_id=row["node_id"],
+            full_name=row["full_name"],
+            created_at=row["gh_created_at"],
+            pushed_at=row["pushed_at"],
+            stars=int(row["stars"] or 0),
+            forks=int(row["forks"] or 0),
+            watchers=int(row["watchers"] or 0),
+            disk_usage_kb=row["disk_usage_kb"],
+            description=row["description"],
+            primary_language=row["primary_language"],
+            license_spdx=row["license_spdx"],
+            topics=tuple(row["topics"] or ()),
+            is_fork=bool(row["is_fork"]),
+            is_archived=bool(row["is_archived"]),
+            is_template=bool(row["is_template"]),
+            is_mirror=bool(row["is_mirror"]),
+            is_empty=False,
+            default_branch=row["default_branch"],
+            commits_count=row["commits_count"],
+            last_commit_at=row["last_commit_at"],
+        )
+
     def as_columns(self) -> dict[str, Any]:
         return {
             "full_name": self.full_name,
@@ -165,46 +195,76 @@ def _words(*texts: str | None) -> set[str]:
     return words
 
 
-def evaluate(metadata: RepositoryMetadata, config: SelectionConfig, reference: date) -> str | None:
-    """Return the first failing criterion (the rejection reason) or ``None`` if selected."""
+CRITERIA = (
+    "empty",
+    "fork",
+    "archived",
+    "mirror",
+    "template",
+    "created_after_cutoff",
+    "license",
+    "no_code_language",
+    "min_stars",
+    "min_commits",
+    "inactive",
+    "keyword",
+)
+"""Every criterion, in evaluation order (a keyword reason is ``keyword:<word>``)."""
+
+
+def failed_criteria(
+    metadata: RepositoryMetadata, config: SelectionConfig, reference: date
+) -> list[str]:
+    """Every failing criterion, in evaluation order (empty when the repository is selected).
+
+    The first one is the rejection reason; the others tell how many repositories each criterion
+    removes on its own (``agm audit``)."""
+    failed: list[str] = []
     if metadata.is_empty or metadata.default_branch is None:
-        return "empty"
+        failed.append("empty")
     if config.exclude_forks and metadata.is_fork:
-        return "fork"
+        failed.append("fork")
     if config.exclude_archived and metadata.is_archived:
-        return "archived"
+        failed.append("archived")
     if config.exclude_mirrors and metadata.is_mirror:
-        return "mirror"
+        failed.append("mirror")
     if config.exclude_templates and metadata.is_template:
-        return "template"
+        failed.append("template")
     if (
         config.created_before is not None
         and metadata.created_at.astimezone(UTC).date() >= config.created_before
     ):
-        return "created_after_cutoff"
+        failed.append("created_after_cutoff")
     if config.allowed_licenses is not None:
         allowed = {spdx.lower() for spdx in config.allowed_licenses}
         if metadata.license_spdx is None or metadata.license_spdx.lower() not in allowed:
-            return "license"
+            failed.append("license")
     if config.require_code_language:
         non_code = {language.lower() for language in config.non_code_languages}
         if metadata.primary_language is None or metadata.primary_language.lower() in non_code:
-            return "no_code_language"
+            failed.append("no_code_language")
     if metadata.stars < config.min_stars:
-        return "min_stars"
+        failed.append("min_stars")
     if metadata.commits_count is not None and metadata.commits_count < config.min_commits:
-        return "min_commits"
+        failed.append("min_commits")
     if config.active_within_days is not None:
         cutoff = reference - timedelta(days=config.active_within_days)
         last_commit = metadata.last_commit_at
         if last_commit is None or last_commit.astimezone(UTC).date() < cutoff:
-            return "inactive"
+            failed.append("inactive")
     name = metadata.full_name.split("/", 1)[-1]
     words = _words(name, metadata.description, *metadata.topics)
     for keyword in config.exclude_keywords:
         if _singular(keyword.lower()) in words:
-            return f"keyword:{keyword.lower()}"
-    return None
+            failed.append(f"keyword:{keyword.lower()}")
+            break
+    return failed
+
+
+def evaluate(metadata: RepositoryMetadata, config: SelectionConfig, reference: date) -> str | None:
+    """Return the first failing criterion (the rejection reason) or ``None`` if selected."""
+    failed = failed_criteria(metadata, config, reference)
+    return failed[0] if failed else None
 
 
 def reference_date(config: SelectionConfig) -> date:

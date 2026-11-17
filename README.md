@@ -733,6 +733,72 @@ A tabela "por faixa de tamanho" mostra se uma diferença (por exemplo, menos blo
 vem de arquivos menores ou de outro jeito de escrever. `code_blocks` conta blocos cercados e
 indentados.
 
+## Auditoria da amostra (vieses de coleta)
+
+`agm audit` lê só um export bronze (como o `analyze`, sem banco) e mostra onde a descoberta, a
+seleção e a mineração podem ter enviesado a amostra. Ele grava
+`DATA_DIR/audit/<export>/audit.json` e `audit.md`. Rode de novo depois de cada `agm export`:
+
+```bash
+poetry run agm export && poetry run agm audit
+```
+
+O relatório tem quatro partes e uma lista de avisos (`warnings`) em linguagem direta:
+
+- **descoberta**: para cada query do `study.yaml`, se ela foi buscada, qual faixa de tamanho foi
+  coletada, que fração da população estimada pela API essa faixa cobre, quantas fatias passaram
+  do limite de 1000 resultados e quantos resultados ficaram inacessíveis. Também mostra o que veio
+  de fora do protocolo atual (outra faixa de tamanho ou query) e quantos repositórios mantidos só
+  foram achados assim;
+- **seleção**: o funil (primeiro critério que falhou) e, para cada critério, quantos
+  repositórios falham nele e quantos falham **só** nele (entrariam na amostra sem ele). Mostra
+  também os repositórios mais populares rejeitados só pela licença, as estrelas e o ano de criação
+  dos mantidos, e os status gravados que a configuração atual não confirma (sinal para rodar
+  `agm select --reevaluate`);
+- **mineração**: falhas por tipo de erro, conteúdos omitidos, o período da mineração e quantos
+  repositórios foram minerados depois da `reference_date`;
+- **corte do histórico**: o que o corte na `reference_date` remove (commits, mudanças, artefatos
+  que ainda não existiam ou estavam em outro estado, autores que ainda não tinham commitado),
+  quantos repositórios foram minerados antes do fim da data e podem não ter alguns dias de
+  histórico, os artefatos sem mudança registrada e os arquivos elegíveis no HEAD comparados aos
+  elegíveis na data de corte. O `analyze` ainda não aplica o corte
+  (`analysis.truncate_at_reference_date`); a auditoria mostra o que ele removeria;
+- **artefatos** (no HEAD dos repositórios minerados, antes do filtro de contribuidores humanos):
+  por tipo de arquivo, symlinks, arquivos abaixo de `min_artifact_bytes`, arquivos elegíveis
+  maiores que a faixa coletada da query daquele tipo, e repositórios cujos arquivos de um tipo só
+  chegaram pela query de outro tipo. Mostra ainda a concentração (fração dos arquivos nos 1%
+  repositórios com mais arquivos) e as duplicatas (blobs idênticos).
+
+O critério de tamanho segue o da amostra (`analysis.min_artifact_bytes`, sem symlinks). A
+configuração usada é a do `--study` (padrão `STUDY_CONFIG_PATH`), e o relatório avisa quando ela
+difere da que foi gravada no export.
+
+### Para o artigo (LaTeX)
+
+A auditoria também grava dois arquivos LaTeX, em português e no formato do template da SBC
+(tabelas só com `tabular` e `\hline`, números como `5.380` e `9,5\%`):
+
+- `audit.tex`: uma macro por número (`\auditKept`, `\auditCoverageClaude`,
+  `\auditOnlyLicense`, `\auditTopOnePctShare`...) e uma macro por tabela
+  (`\auditTableDiscovery`, `\auditTableSelection`, `\auditTableArtifacts`, com os rótulos
+  `tab:audit-*`). Não edite esse arquivo: rode a auditoria de novo;
+- `audit_rascunho.tex`: rascunho dos parágrafos de descoberta, seleção, mineração e ameaças à
+  validade, escrito com as macros. As primeiras linhas listam, como comentários, os avisos da
+  auditoria. Copie o texto para o artigo e edite lá.
+
+No artigo, carregue as macros uma vez no preâmbulo e use as tabelas onde quiser:
+
+```latex
+\input{audit}            % preâmbulo
+...
+\auditTableSelection     % no texto
+Dos \auditEvaluated{} repositórios avaliados, \auditKept{} foram mantidos.
+```
+
+Depois de uma nova coleta (`agm export && agm audit`), basta trocar o `audit.tex` no Overleaf
+para todos os números do texto e das tabelas se atualizarem. O comentário no topo do arquivo
+registra o export, o `code_version` e o hash do `study.yaml` de onde os números vieram.
+
 ## Testes
 
 ```bash

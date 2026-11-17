@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -217,6 +217,10 @@ class AnalysisConfig(_StrictModel):
     # ... and a repository when it has one such artifact and this many human authors (neither
     # bot_patterns nor agent_patterns) in its whole history.
     min_human_contributors: int = 2
+    # Cut the mined history at the end of selection.reference_date (analysis/history_cutoff.py),
+    # so every repository is seen at the same instant however late it was mined. `agm audit`
+    # reports what the cut removes; `agm analyze` does not apply it yet.
+    truncate_at_reference_date: bool = False
     # Author role thresholds, expressed as share of the author's file changes.
     docs_focused_min_share: float = 0.8
     code_focused_min_share: float = 0.5
@@ -341,6 +345,18 @@ class StudyConfig(_StrictModel):
     mining: MiningConfig = Field(default_factory=MiningConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     rq1: Rq1Config = Field(default_factory=Rq1Config)
+
+    @model_validator(mode="after")
+    def _cutoff_needs_a_date(self) -> StudyConfig:
+        if self.analysis.truncate_at_reference_date and self.selection.reference_date is None:
+            raise ValueError(
+                "analysis.truncate_at_reference_date needs a fixed selection.reference_date"
+            )
+        return self
+
+    def history_cutoff(self) -> date | None:
+        """The date the analysis cuts the history at (``None``: no cut)."""
+        return self.selection.reference_date if self.analysis.truncate_at_reference_date else None
 
     def snapshot(self) -> dict:
         return self.model_dump(mode="json")

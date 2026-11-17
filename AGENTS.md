@@ -28,6 +28,7 @@ poetry run agm add-repo owner/name  #    registra repositórios à mão (marcado
 poetry run agm mine --workers 4     # 3. clone git parcial → commits, versões, mudanças
 poetry run agm export               # 4. banco → data/bronze/<timestamp>/*.parquet + manifest.json
 poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silver + gold por RQ)
+poetry run agm audit                # bronze → data/audit/<export>/: vieses (json, md e LaTeX)
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
 poetry run agm help [comando...]    # lista todos os comandos e o que fazem
 poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
@@ -65,7 +66,13 @@ src/agm_miner/
   github/client.py    # REST code search + GraphQL, com pacing, quota por bucket e retry limitado
   stages/             # discovery, selection, mining (persistência + concorrência), export
   analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets,
-                      # rq2_summary (tabelas da RQ2 a partir de rq2_structure; agm rq2 summary)
+                      # rq2_summary (tabelas da RQ2 a partir de rq2_structure; agm rq2 summary),
+                      # history_cutoff (corte do histórico na reference_date; a auditoria mede
+                      # o que ele remove), sampling_audit (cobertura da descoberta, efeito de
+                      # cada critério, falhas e cobertura dos artefatos a partir do bronze;
+                      # agm audit), audit_latex (macros, tabelas e rascunho em LaTeX da
+                      # auditoria, para o artigo; toda macro usada no rascunho precisa existir
+                      # no audit.tex)
   rq1/                # RQ1 com LLM: units (section_key), sampling, codebook, llm (SDK anthropic,
                       # Batches), store (cache + estado dos lotes), execution (lotes retomáveis),
                       # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)

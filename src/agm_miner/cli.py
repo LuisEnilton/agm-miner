@@ -99,6 +99,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
 
     @functools.wraps(command)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        from agm_miner.analysis.sampling_audit import AuditOutputError
         from agm_miner.database.schema import SchemaMismatchError
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
@@ -128,6 +129,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             )
             raise typer.Exit(code=130) from exc
         except (
+            AuditOutputError,
             SchemaMismatchError,
             StageBusyError,
             GitError,

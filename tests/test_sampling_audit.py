@@ -12,6 +12,8 @@ import pytest
 from typer.testing import CliRunner
 
 from agm_miner.analysis.sampling_audit import (
+    AUDIT_FILES,
+    AuditOutputError,
     _warnings,
     artifact_coverage,
     audit_tables,
@@ -501,3 +503,31 @@ def test_audit_command(tmp_path: Path, monkeypatch) -> None:
 
     missing = CliRunner().invoke(app, ["audit", "--bronze", str(tmp_path / "nope")])
     assert missing.exit_code == 1 and "error:" in missing.output
+
+
+def test_write_audit_refuses_to_replace_anything_but_an_audit(tmp_path: Path) -> None:
+    bronze = tmp_path / "bronze" / "20261116T000000Z"
+    _write_bronze(bronze, bronze_tables(), config_hash="older")
+    # `--output data` must not wipe the data directory (the output is deleted and rewritten).
+    data = tmp_path / "data"
+    (data / "bronze").mkdir(parents=True)
+    (data / "keep.txt").write_text("precious")
+    with pytest.raises(AuditOutputError, match="keep.txt"):
+        write_audit(bronze, data, STUDY)
+    assert (data / "keep.txt").read_text() == "precious" and (data / "bronze").is_dir()
+    assert not (tmp_path / "data.partial").exists()
+    a_file = tmp_path / "file.txt"
+    a_file.write_text("x")
+    with pytest.raises(AuditOutputError, match="not a directory"):
+        write_audit(bronze, a_file, STUDY)
+
+    # An empty directory and a previous audit are fine.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    write_audit(bronze, empty, STUDY)
+    write_audit(bronze, empty, STUDY)
+    assert sorted(path.name for path in empty.iterdir()) == sorted(AUDIT_FILES)
+
+    refused = CliRunner().invoke(app, ["audit", "--bronze", str(bronze), "--output", str(data)])
+    assert refused.exit_code == 1 and "choose another --output" in refused.output
+    assert (data / "keep.txt").exists()

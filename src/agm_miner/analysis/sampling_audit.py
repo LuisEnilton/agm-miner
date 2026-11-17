@@ -53,6 +53,7 @@ from agm_miner.stages.selection import (
 )
 
 AUDIT_JSON, AUDIT_MD = "audit.json", "audit.md"
+AUDIT_FILES = frozenset({AUDIT_JSON, AUDIT_MD, AUDIT_TEX, DRAFT_TEX})
 KEPT_STATUSES = ("SELECTED", "MINED", "FAILED")
 MANUAL_PREFIX = "manual:"
 _SIZED_KINDS = (ArtifactKind.INSTRUCTION.value, ArtifactKind.SKILL_MANIFEST.value)
@@ -806,6 +807,25 @@ def audit_markdown(audit: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+class AuditOutputError(RuntimeError):
+    """The output directory holds something other than a previous audit."""
+
+
+def check_output_dir(output_dir: Path) -> None:
+    """Refuse an output that is not a previous audit: ``write_audit`` deletes and rewrites it,
+    so ``--output data`` would otherwise wipe the whole data directory."""
+    if not output_dir.exists():
+        return
+    if not output_dir.is_dir():
+        raise AuditOutputError(f"{output_dir} exists and is not a directory")
+    others = sorted(path.name for path in output_dir.iterdir() if path.name not in AUDIT_FILES)
+    if others:
+        raise AuditOutputError(
+            f"{output_dir} holds files that are not an audit ({', '.join(others[:5])}); "
+            "choose another --output"
+        )
+
+
 def write_audit(
     bronze_dir: Path,
     output_dir: Path,
@@ -815,7 +835,9 @@ def write_audit(
 ) -> dict[str, Any]:
     """Audit a bronze export and write ``audit.json``, ``audit.md`` and the paper's LaTeX
     (``audit.tex``, ``audit_rascunho.tex``; see ``audit_latex``) into ``output_dir``, through a
-    ``.partial`` folder renamed at the end."""
+    ``.partial`` folder renamed at the end. An existing ``output_dir`` is replaced only when it
+    holds nothing but a previous audit (``check_output_dir``)."""
+    check_output_dir(output_dir)
     manifest = read_manifest(bronze_dir)
     audit: dict[str, Any] = {
         "created_at": datetime.now(UTC).isoformat(),

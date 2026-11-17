@@ -19,6 +19,7 @@ from agm_miner.analysis.audit_latex import (
     macro_values,
     number,
     percent,
+    top_criterion,
 )
 from agm_miner.analysis.sampling_audit import _warnings, audit_tables
 from tests.test_sampling_audit import STUDY, bronze_tables
@@ -138,3 +139,26 @@ def test_generated_latex_compiles(tmp_path: Path) -> None:
     # pdflatex logs in 8-bit, not UTF-8.
     assert done.returncode == 0, done.stdout.decode("latin-1")[-2000:]
     assert (tmp_path / "paper.pdf").exists()
+
+
+def test_the_draft_names_the_criterion_that_rejects_the_most() -> None:
+    audit = make_audit()
+    # License and stars reject one repository each: the tie goes to the evaluation order.
+    assert top_criterion(audit["selection"]) == "license"
+    values = macro_values(audit)
+    assert values["auditTopCriterion"] == "licença não aprovada pela OSI"
+    assert values["auditTopCriterionShare"] == r"20\%"
+    draft = draft_tex(audit)
+    assert "O critério que mais exclui repositórios é \\emph{\\auditTopCriterion}" in draft
+    assert "mais restritivo" not in draft
+
+    audit["selection"]["criteria"]["min_stars"]["fail"] = 4
+    audit["selection"]["criteria"]["min_stars"]["fail_share"] = 0.8
+    assert top_criterion(audit["selection"]) == "min_stars"
+    assert macro_values(audit)["auditTopCriterion"] == "menos de 50 estrelas"
+
+    for effect in audit["selection"]["criteria"].values():
+        effect["fail"] = 0
+    assert top_criterion(audit["selection"]) is None
+    assert macro_values(audit)["auditTopCriterion"] == "---"
+    assert "mais exclui" not in draft_tex(audit)

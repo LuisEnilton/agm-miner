@@ -143,6 +143,13 @@ def macro_values(audit: Mapping[str, Any]) -> dict[str, str]:
         values[f"auditFail{name}"] = number(effect["fail"])
         values[f"auditFailShare{name}"] = percent(effect["fail_share"])
         values[f"auditOnly{name}"] = number(effect["only_failure"])
+    top = top_criterion(selection)
+    values["auditTopCriterion"] = (
+        criterion_label(top, config["selection"]) if top is not None else MISSING
+    )
+    values["auditTopCriterionShare"] = (
+        percent(selection["criteria"][top]["fail_share"]) if top is not None else MISSING
+    )
     examples = selection["only_license"]["top_by_stars"][:3]
     values["auditLicenseExamples"] = (
         ", ".join(rf"\texttt{{{escape(r['full_name'])}}}" for r in examples) or MISSING
@@ -219,6 +226,16 @@ def macro_values(audit: Mapping[str, Any]) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------- tables
+
+
+def top_criterion(selection: Mapping[str, Any]) -> str | None:
+    """The criterion most evaluated repositories fail (ties: evaluation order), or ``None`` when
+    no criterion rejects anything. The draft names it instead of assuming which one it is."""
+    failing = [(effect["fail"], c) for c, effect in selection["criteria"].items() if effect["fail"]]
+    if not failing:
+        return None
+    most = max(fail for fail, _ in failing)
+    return next(criterion for fail, criterion in failing if fail == most)
 
 
 def criterion_label(criterion: str, selection_config: Mapping[str, Any]) -> str:
@@ -428,9 +445,14 @@ def draft_tex(audit: Mapping[str, Any]) -> str:
         "",
         "\\paragraph{Seleção.} Dos \\auditEvaluated{} repositórios com metadados disponíveis, "
         "\\auditKept{} atenderam a todos os critérios de seleção "
-        "(Tabela~\\ref{tab:audit-selection}). O critério de popularidade (pelo menos "
-        "\\auditMinStars{} estrelas) é o mais restritivo: \\auditFailShareMinStars{} dos "
-        "repositórios avaliados não o atendem. A tabela também mostra, para cada critério, "
+        "(Tabela~\\ref{tab:audit-selection}). "
+        + (
+            "O critério que mais exclui repositórios é \\emph{\\auditTopCriterion}, que "
+            "atinge \\auditTopCriterionShare{} dos avaliados. "
+            if top_criterion(audit["selection"]) is not None
+            else ""
+        )
+        + "A tabela também mostra, para cada critério, "
         "quantos repositórios seriam incluídos se apenas ele fosse removido. A exigência de "
         "licença aprovada pela OSI exclui sozinha \\auditOnlyLicense{} repositórios, entre eles "
         "projetos populares sem licença detectada pelo GitHub ou com licença própria, como "

@@ -67,12 +67,12 @@ src/agm_miner/
   stages/             # discovery, selection, mining (persistência + concorrência), export
   analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets,
                       # rq2_summary (tabelas da RQ2 a partir de rq2_structure; agm rq2 summary),
-                      # history_cutoff (corte do histórico na reference_date; a auditoria mede
-                      # o que ele remove), sampling_audit (cobertura da descoberta, efeito de
-                      # cada critério, falhas e cobertura dos artefatos a partir do bronze;
-                      # agm audit), audit_latex (macros, tabelas e rascunho em LaTeX da
-                      # auditoria, para o artigo; toda macro usada no rascunho precisa existir
-                      # no audit.tex)
+                      # history_cutoff (corta o histórico na reference_date antes do analyze;
+                      # a auditoria mede o que ele remove), sampling_audit (cobertura da
+                      # descoberta, efeito de cada critério, falhas e cobertura dos artefatos a
+                      # partir do bronze; agm audit), audit_latex (macros, tabelas e rascunho
+                      # em LaTeX da auditoria, para o artigo; toda macro usada no rascunho
+                      # precisa existir no audit.tex)
   rq1/                # RQ1 com LLM: units (section_key), sampling, codebook, llm (SDK anthropic,
                       # Batches), store (cache + estado dos lotes), execution (lotes retomáveis),
                       # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)
@@ -91,6 +91,24 @@ Princípios que precisam ser mantidos:
    padrões de bot/agente, janela de burst). Cada execução guarda um snapshot e o hash desse arquivo.
 3. **A análise não acessa o banco**: ela lê apenas `data/bronze/<export>/`, que é a unidade de
    replicação. `analysis_manifest.json` registra o export de origem, a config e o `code_version`.
+   **Memória do `analyze`:** o `content` das versões passa de 4 GB descomprimido, e estourar a
+   RAM do WSL derruba o VS Code junto. O que mantém o pico em poucos GB:
+   - `load_bronze` carrega `artifact_versions` sem `content`, que `build_version_tables` lê em
+     fatias (`read_version_contents`: `scan_parquet` + `slice`; o `ParquetFile.iter_batches`
+     do pyarrow retinha no pool tudo o que já tinha lido). `commit_files` (11 milhões de
+     linhas) não é carregado: `co_changed_counts` o agrega de um scan em modo streaming.
+   - `clear_syllable_cache` limpa a cada lote o cache do pyphen (usado pelo textstat), que
+     guardava cada palavra distinta do corpus sem limite.
+   - A RQ3 guarda só um `DocumentOutline` (digests das seções + frontmatter) por blob.
+   - Saídas grandes vão para o disco em blocos (`_write_chunks`): `silver_version_sections`
+     durante o parse, `rq1_sections` (fatias do arquivo de seções filtradas na consulta e
+     ordenadas pelas chaves) e `rq3_changes` (a mensagem do commit entra bloco a bloco).
+     As outras são gravadas e liberadas assim que ficam prontas.
+   - Strings do polars compartilham buffers: um `filter`/`gather` sobre um frame coletado
+     mantém o frame inteiro vivo. Filtre dentro da consulta lazy.
+
+   Não carregue o conteúdo inteiro nem acumule linhas de tabelas grandes em listas Python
+   (`_FrameChunks`). Para medir, rode com `systemd-run --user --scope -p MemoryMax=5G`.
 4. **Mineração idempotente**: `persist_extraction` apaga e reinsere os dados do repositório numa
    única transação. Cada repositório é protegido por `pg_try_advisory_lock(repo_id)`. Erros viram
    `FAILED` + `last_error` + `attempts`.
@@ -260,6 +278,10 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
   formados por caminhos ou URLs sem espaços (muitas sílabas por "palavra").
 - Itens de lista tight não contam como parágrafos, URLs soltas contam como links e o BOM UTF-8 é
   ignorado antes do frontmatter.
+- A mineração leva semanas; com `analysis.truncate_at_reference_date` o `analyze` corta o
+  histórico no fim da `reference_date` (`analysis/history_cutoff.py`, aplicado às tabelas do
+  bronze logo depois de carregá-las). Não dá para cortar `identities.commits` nem
+  `contributor_activity` (agregados do clone inteiro), nem os metadados da seleção.
 - `reference_date` no `study.yaml` fica fixa durante a coleta. O corte `created_before` do estudo
   (2026-08-01) é mais tardio que o dos artigos relacionados (2024-01-01, o padrão de `config.py`),
   então a amostra inclui projetos criados já com agentes.

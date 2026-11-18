@@ -7,7 +7,7 @@ import textstat
 
 from agm_miner.analysis.markdown import count_words, parse_document, split_frontmatter
 from agm_miner.analysis.metrics import compute_metrics
-from agm_miner.analysis.structure_diff import diff_documents
+from agm_miner.analysis.structure_diff import diff_documents, outline
 
 CLAUDE_MD = """Intro line before any heading.
 
@@ -276,3 +276,14 @@ def test_repeated_headings_are_disambiguated() -> None:
     before = parse_document("## Notes\na\n\n## Notes\nb\n")
     after = parse_document("## Notes\na\n")
     assert diff_documents(before, after).sections_removed == ["Notes #2"]
+
+
+def test_outlines_diff_like_the_documents_they_summarize() -> None:
+    before = parse_document(
+        "---\nname: a\n---\n# A\n\n## Setup\nold\n\n## Notes\nx\n\n## Notes\ny\n"
+    )
+    after = parse_document("---\nname: b\nmodel: m\n---\n# A\n\n## Setup\nnew\n\n## Notes\nx\n")
+    assert diff_documents(outline(before), outline(after)) == diff_documents(before, after)
+    assert diff_documents(None, outline(after)) == diff_documents(None, after)
+    # The outline keeps digests, never the section text.
+    assert all(isinstance(digest, bytes) for _, digest in outline(before).sections)

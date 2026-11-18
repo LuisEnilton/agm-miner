@@ -35,7 +35,12 @@ agm discover → agm select → agm mine → agm export → agm analyze
 5. **analyze**: a partir de um export bronze, sem precisar do banco, gera em
    `data/gold/<timestamp>/` as tabelas `rq1_sections`, `rq2_structure`, `rq3_changes`,
    `rq3_author_roles` e `repo_features`. As tabelas gold contêm só a amostra do estudo (critérios
-   que dependem do histórico minerado); as silver guardam tudo.
+   que dependem do histórico minerado); as silver guardam tudo. O conteúdo das versões é lido em
+   lotes e as seções vão para o disco à medida que são geradas, então nem o conteúdo nem as
+   seções ficam inteiros na memória; as demais tabelas do bronze (como `commits`, com as
+   mensagens) ainda são carregadas, e o pico cresce com elas. Para garantir que um erro de memória derrube só o analyze, e
+   não o VS Code junto (no WSL os dois dividem a mesma VM), rode com um teto:
+   `systemd-run --user --scope -p MemoryMax=5G poetry run agm analyze`.
 
 Toda execução fica registrada em `pipeline_runs`, com parâmetros, estatísticas, o snapshot do
 `study.yaml` e o commit do código. Isso garante a rastreabilidade do dataset.
@@ -380,6 +385,31 @@ selection:
   desligado.
 
 As datas são escritas no formato `AAAA-MM-DD`, sem aspas.
+
+#### Corte do histórico na data de referência
+
+A mineração leva semanas, então cada repositório é clonado num dia diferente. Com
+`analysis.truncate_at_reference_date: true` (o valor do `study.yaml`), o `analyze` corta o
+histórico no fim da `reference_date` (meia-noite UTC do dia seguinte), como se todos os
+repositórios tivessem sido minerados nesse instante:
+
+- commits feitos depois do corte saem da análise, com as mudanças de artefatos, os arquivos e os
+  co-autores deles;
+- um artefato alterado depois do corte é analisado no estado da última mudança antes dele (ou
+  some, se essa mudança foi uma remoção); um artefato criado depois do corte ainda não existia e
+  sai da análise. Um artefato sem mudanças depois do corte fica como estava no HEAD minerado,
+  inclusive os poucos sem nenhuma mudança registrada (alterados só em commits de merge);
+- autores cujo primeiro commit é posterior ao corte saem da análise, e a atividade mensal termina
+  no mês do corte.
+
+O minerador continua gravando o histórico inteiro: o corte é feito só na análise, e o
+`analysis_manifest.json` registra a data e o que foi removido (`history_cutoff`). Ele exige uma
+`reference_date` fixa. Duas coisas não podem ser cortadas e precisam ser declaradas no artigo: o
+total de commits de cada autor e o perfil de atividade dele (`identities.commits`,
+`contributor_activity`, usados nos papéis de autor) cobrem o histórico inteiro do clone, e os
+metadados do GitHub (estrelas, licença, linguagem) são do momento da seleção. Os commits são
+datados por `committed_at`; um commit feito antes do corte e integrado ao branch depois dele
+continua na análise.
 
 #### Licenças
 
@@ -761,8 +791,8 @@ O relatório tem quatro partes e uma lista de avisos (`warnings`) em linguagem d
   que ainda não existiam ou estavam em outro estado, autores que ainda não tinham commitado),
   quantos repositórios foram minerados antes do fim da data e podem não ter alguns dias de
   histórico, os artefatos sem mudança registrada e os arquivos elegíveis no HEAD comparados aos
-  elegíveis na data de corte. O `analyze` ainda não aplica o corte
-  (`analysis.truncate_at_reference_date`); a auditoria mostra o que ele removeria;
+  elegíveis na data de corte. Os números aparecem mesmo com o corte desligado, mostrando o que
+  ele removeria;
 - **artefatos** (no HEAD dos repositórios minerados, antes do filtro de contribuidores humanos):
   por tipo de arquivo, symlinks, arquivos abaixo de `min_artifact_bytes`, arquivos elegíveis
   maiores que a faixa coletada da query daquele tipo, e repositórios cujos arquivos de um tipo só

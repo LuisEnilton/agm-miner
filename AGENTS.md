@@ -91,6 +91,24 @@ Princípios que precisam ser mantidos:
    padrões de bot/agente, janela de burst). Cada execução guarda um snapshot e o hash desse arquivo.
 3. **A análise não acessa o banco**: ela lê apenas `data/bronze/<export>/`, que é a unidade de
    replicação. `analysis_manifest.json` registra o export de origem, a config e o `code_version`.
+   **Memória do `analyze`:** o `content` das versões passa de 4 GB descomprimido, e estourar a
+   RAM do WSL derruba o VS Code junto. O que mantém o pico em poucos GB:
+   - `load_bronze` carrega `artifact_versions` sem `content`, que `build_version_tables` lê em
+     fatias (`read_version_contents`: `scan_parquet` + `slice`; o `ParquetFile.iter_batches`
+     do pyarrow retinha no pool tudo o que já tinha lido). `commit_files` (11 milhões de
+     linhas) não é carregado: `co_changed_counts` o agrega de um scan em modo streaming.
+   - `clear_syllable_cache` limpa a cada lote o cache do pyphen (usado pelo textstat), que
+     guardava cada palavra distinta do corpus sem limite.
+   - A RQ3 guarda só um `DocumentOutline` (digests das seções + frontmatter) por blob.
+   - Saídas grandes vão para o disco em blocos (`_write_chunks`): `silver_version_sections`
+     durante o parse, `rq1_sections` (fatias do arquivo de seções filtradas na consulta e
+     ordenadas pelas chaves) e `rq3_changes` (a mensagem do commit entra bloco a bloco).
+     As outras são gravadas e liberadas assim que ficam prontas.
+   - Strings do polars compartilham buffers: um `filter`/`gather` sobre um frame coletado
+     mantém o frame inteiro vivo. Filtre dentro da consulta lazy.
+
+   Não carregue o conteúdo inteiro nem acumule linhas de tabelas grandes em listas Python
+   (`_FrameChunks`). Para medir, rode com `systemd-run --user --scope -p MemoryMax=5G`.
 4. **Mineração idempotente**: `persist_extraction` apaga e reinsere os dados do repositório numa
    única transação. Cada repositório é protegido por `pg_try_advisory_lock(repo_id)`. Erros viram
    `FAILED` + `last_error` + `attempts`.

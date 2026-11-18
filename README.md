@@ -35,7 +35,11 @@ agm discover → agm select → agm mine → agm export → agm analyze
 5. **analyze**: a partir de um export bronze, sem precisar do banco, gera em
    `data/gold/<timestamp>/` as tabelas `rq1_sections`, `rq2_structure`, `rq3_changes`,
    `rq3_author_roles` e `repo_features`. As tabelas gold contêm só a amostra do estudo (critérios
-   que dependem do histórico minerado); as silver guardam tudo.
+   que dependem do histórico minerado); as silver guardam tudo. O conteúdo das versões é lido em
+   lotes e as seções vão para o disco à medida que são geradas, então o pico de memória não
+   cresce com o tamanho do export. Para garantir que um erro de memória derrube só o analyze, e
+   não o VS Code junto (no WSL os dois dividem a mesma VM), rode com um teto:
+   `systemd-run --user --scope -p MemoryMax=5G poetry run agm analyze`.
 
 Toda execução fica registrada em `pipeline_runs`, com parâmetros, estatísticas, o snapshot do
 `study.yaml` e o commit do código. Isso garante a rastreabilidade do dataset.

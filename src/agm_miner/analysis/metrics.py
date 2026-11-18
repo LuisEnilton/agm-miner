@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import pyphen
 import textstat
 from langdetect import DetectorFactory, LangDetectException, detect
 
@@ -13,6 +14,18 @@ from agm_miner.analysis.markdown import ParsedDocument, parse_document
 
 # langdetect is probabilistic; a fixed seed makes results reproducible.
 DetectorFactory.seed = 0
+
+
+def clear_syllable_cache() -> None:
+    """Empty the word cache of pyphen, which textstat uses to count syllables.
+
+    pyphen memoizes the hyphenation of every distinct word it sees, without bound; over the
+    whole corpus (identifiers, paths, URLs) that grew by gigabytes. The cache only saves time,
+    so clearing it never changes a result."""
+    for dictionary in getattr(pyphen, "hdcache", {}).values():
+        cache = getattr(dictionary, "cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
 
 
 @dataclass(frozen=True, slots=True)

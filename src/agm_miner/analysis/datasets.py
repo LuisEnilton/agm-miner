@@ -24,17 +24,19 @@ import json
 import logging
 import shutil
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 import polars as pl
+import pyarrow.parquet as pq
 
 from agm_miner.analysis.authors import author_role, category_shares, detect_agent, is_bot
 from agm_miner.analysis.history_cutoff import cut_history
 from agm_miner.analysis.markdown import ParsedDocument, count_words
-from agm_miner.analysis.metrics import compute_metrics
-from agm_miner.analysis.structure_diff import diff_documents
+from agm_miner.analysis.metrics import clear_syllable_cache, compute_metrics
+from agm_miner.analysis.structure_diff import DocumentOutline, diff_documents, outline
 from agm_miner.artifacts import ArtifactKind, ArtifactTool
 from agm_miner.config import AnalysisConfig
 from agm_miner.file_categories import FileCategory
@@ -60,6 +62,20 @@ BRONZE_TABLES = (
 _MARKDOWN_SUFFIXES = (".md", ".markdown", ".mdx")
 ANALYSIS_MANIFEST = "analysis_manifest.json"
 _MANUAL_QUERY_PREFIX = "manual:"
+# Version contents are read from the bronze export a slice at a time, never whole: ``content``
+# is most of the export (gigabytes once decompressed). Each slice is collected by polars and
+# handed out in batches (``ParquetFile.iter_batches`` was not used: pyarrow's memory pool kept
+# every batch it had read, growing to the size of the whole column).
+CONTENT_SLICE_ROWS = 20_000
+CONTENT_BATCH_ROWS = 2_000
+# ``version_sections`` is read back (for ``rq1_sections``) this many rows at a time.
+_SECTIONS_SLICE_ROWS = 200_000
+# Tables never loaded whole: aggregated from a scan of the Parquet file instead.
+# ``commit_files`` has a row per file of every artifact commit (millions; >1 GB in memory).
+SCANNED_TABLES = ("commit_files",)
+# Python rows are turned into a frame (or written out) every this many rows.
+_CHUNK_ROWS = 20_000
+SILVER_VERSION_SECTIONS = "silver_version_sections"
 
 
 def latest_analysis(gold_root: Path) -> Path:
@@ -75,7 +91,106 @@ def latest_analysis(gold_root: Path) -> Path:
 
 
 def load_bronze(bronze_dir: Path) -> dict[str, pl.DataFrame]:
-    return {name: pl.read_parquet(bronze_dir / f"{name}.parquet") for name in BRONZE_TABLES}
+    """The bronze tables, with ``artifact_versions`` *without* its ``content`` column (read in
+    batches by ``read_version_contents``) and without ``SCANNED_TABLES`` (``scan_bronze``)."""
+    tables = {}
+    for name in BRONZE_TABLES:
+        if name in SCANNED_TABLES:
+            continue
+        path = bronze_dir / f"{name}.parquet"
+        columns = None
+        if name == "artifact_versions":
+            columns = [column for column in pq.read_schema(path).names if column != "content"]
+        tables[name] = pl.read_parquet(path, columns=columns)
+    return tables
+
+
+def scan_bronze(bronze_dir: Path, name: str) -> pl.LazyFrame:
+    return pl.scan_parquet(bronze_dir / f"{name}.parquet")
+
+
+def _scan_slices(
+    scan: pl.LazyFrame, slice_rows: int, predicate: pl.Expr | None = None
+) -> Iterator[pl.DataFrame]:
+    """The rows of ``scan`` collected ``slice_rows`` at a time, in order (at least one frame,
+    so an empty scan still yields its schema), each filtered by ``predicate`` in the query."""
+    total = scan.select(pl.len()).collect().item()
+    for offset in range(0, max(total, 1), slice_rows):
+        query = scan.slice(offset, slice_rows)
+        yield (query if predicate is None else query.filter(predicate)).collect()
+
+
+def read_version_contents(
+    bronze_dir: Path,
+    batch_rows: int | None = None,
+    slice_rows: int | None = None,
+) -> Iterator[pl.DataFrame]:
+    """``(id, content)`` of every artifact version, a batch at a time, in file order. Only one
+    slice of ``slice_rows`` versions is in memory at a time."""
+    scan = scan_bronze(bronze_dir, "artifact_versions").select("id", "content")
+    for chunk in _scan_slices(scan, slice_rows or CONTENT_SLICE_ROWS):
+        yield from chunk.iter_slices(batch_rows or CONTENT_BATCH_ROWS)
+
+
+def contents_of(versions: pl.DataFrame, batch_rows: int = CONTENT_BATCH_ROWS) -> list[pl.DataFrame]:
+    """``(id, content)`` batches of a versions frame that has its contents in memory (tests)."""
+    return list(versions.select("id", "content").iter_slices(batch_rows))
+
+
+class _FrameChunks:
+    """Collects rows as Python dicts and turns them into frames every ``_CHUNK_ROWS`` rows, so
+    the rows of a large table never sit in memory as Python objects. Each chunk goes to
+    ``sink`` when one is given (and nothing is kept), otherwise ``frame()`` concatenates them."""
+
+    def __init__(
+        self,
+        schema: dict[str, Any],
+        sink: Callable[[pl.DataFrame], None] | None = None,
+    ) -> None:
+        self.schema = schema
+        self._sink = sink
+        self._rows: list[dict[str, Any]] = []
+        self._frames: list[pl.DataFrame] = []
+        self.height = 0
+
+    def add(self, row: dict[str, Any]) -> None:
+        self._rows.append(row)
+        if len(self._rows) >= _CHUNK_ROWS:
+            self.flush()
+
+    def extend(self, rows: Iterable[dict[str, Any]]) -> None:
+        for row in rows:
+            self.add(row)
+
+    def flush(self) -> None:
+        if not self._rows:
+            return
+        chunk = pl.DataFrame(self._rows, schema=self.schema)
+        self._rows = []
+        self.height += chunk.height
+        if self._sink is not None:
+            self._sink(chunk)
+        else:
+            self._frames.append(chunk)
+
+    def frame(self) -> pl.DataFrame:
+        self.flush()
+        if not self._frames:
+            return pl.DataFrame(schema=self.schema)
+        return pl.concat(self._frames, rechunk=True)
+
+
+class _ParquetSink:
+    """Appends frames of one schema to a Parquet file (created even when nothing is written)."""
+
+    def __init__(self, path: Path, schema: dict[str, Any]) -> None:
+        self._writer = pq.ParquetWriter(path, pl.DataFrame(schema=schema).to_arrow().schema)
+
+    def __call__(self, frame: pl.DataFrame) -> None:
+        self._writer.write_table(frame.to_arrow())
+
+    def close(self) -> None:
+        self._writer.close()
 
 
 def is_markdown_artifact(path: str, kind: str) -> bool:
@@ -86,47 +201,68 @@ def is_markdown_artifact(path: str, kind: str) -> bool:
 
 
 def build_version_tables(
-    tables: dict[str, pl.DataFrame], config: AnalysisConfig, progress: Progress | None = None
-) -> tuple[pl.DataFrame, pl.DataFrame, dict[tuple[int, str], ParsedDocument]]:
-    """Parse every Markdown version once (cached by blob, since identical blobs are identical
-    content). Returns metrics, sections and the parsed documents keyed by (repo_id, blob_sha)."""
-    versions = tables["artifact_versions"].join(
-        tables["artifacts"].select(pl.col("id").alias("artifact_id"), "path", "kind"),
-        on="artifact_id",
+    tables: dict[str, pl.DataFrame],
+    contents: Iterable[pl.DataFrame],
+    config: AnalysisConfig,
+    sections_path: Path,
+    progress: Progress | None = None,
+) -> tuple[pl.DataFrame, int, dict[tuple[int, str], DocumentOutline]]:
+    """Parse every Markdown version, reading the contents a batch at a time (``contents``:
+    ``(id, content)`` frames, from ``read_version_contents``).
+
+    Returns the metrics, the number of section rows, written to ``sections_path`` as they are
+    produced (``version_sections`` holds the text of every version, so it never sits in
+    memory), and the outline of each parsed blob keyed by (repo_id, blob_sha), for the RQ3
+    diffs. A blob shared by several versions is parsed again for each (no parse cache: it would
+    hold every document in memory)."""
+    versions = (
+        tables["artifact_versions"]
+        .filter(~pl.col("is_symlink").fill_null(False))
+        .join(
+            tables["artifacts"].select(pl.col("id").alias("artifact_id"), "path", "kind"),
+            on="artifact_id",
+        )
     )
-    parsed_by_blob: dict[str, tuple[dict[str, Any], ParsedDocument]] = {}
-    documents: dict[tuple[int, str], ParsedDocument] = {}
-    metric_rows: list[dict[str, Any]] = []
-    section_rows: list[dict[str, Any]] = []
+    wanted: dict[int, tuple[int, int, str]] = {
+        row[0]: (row[1], row[2], row[3])
+        for row in versions.select(
+            "id", "artifact_id", "repo_id", "blob_sha", "path", "kind"
+        ).iter_rows()
+        if is_markdown_artifact(row[4], row[5])
+    }
+    outlines: dict[tuple[int, str], DocumentOutline] = {}
+    outline_by_blob: dict[str, DocumentOutline] = {}
+    metrics = _FrameChunks(METRICS_SCHEMA)
+    sink = _ParquetSink(sections_path, SECTIONS_SCHEMA)
+    sections = _FrameChunks(SECTIONS_SCHEMA, sink)
 
     progress = progress or Progress()
-    progress.set_total("versions", versions.height)
-    for row in versions.iter_rows(named=True):
-        progress.advance("versions")
-        if (
-            row["content"] is None
-            or row["is_symlink"]
-            or not is_markdown_artifact(row["path"], row["kind"])
-        ):
-            continue
-        cached = parsed_by_blob.get(row["blob_sha"])
-        if cached is None:
-            metrics, document = compute_metrics(row["content"], config.min_chars_for_language)
-            cached = (metrics.as_row(), document)
-            parsed_by_blob[row["blob_sha"]] = cached
-        metrics_row, document = cached
-        documents[(row["repo_id"], row["blob_sha"])] = document
-        metric_rows.append(
-            {"version_id": row["id"], "artifact_id": row["artifact_id"], "repo_id": row["repo_id"]}
-            | metrics_row
-        )
-        section_rows.extend(
-            document_section_rows(document, row["id"], row["artifact_id"], row["repo_id"])
-        )
-
-    metrics_frame = pl.DataFrame(metric_rows, schema=METRICS_SCHEMA)
-    sections_frame = pl.DataFrame(section_rows, schema=SECTIONS_SCHEMA)
-    return metrics_frame, sections_frame, documents
+    progress.set_total("versions", len(wanted))
+    try:
+        for batch in contents:
+            for version_id, content in batch.iter_rows():
+                meta = wanted.get(version_id)
+                if meta is None:
+                    continue
+                progress.advance("versions")
+                if content is None:
+                    continue
+                artifact_id, repo_id, blob_sha = meta
+                version_metrics, document = compute_metrics(content, config.min_chars_for_language)
+                shared = outline_by_blob.get(blob_sha)
+                if shared is None:
+                    shared = outline_by_blob[blob_sha] = outline(document)
+                outlines[(repo_id, blob_sha)] = shared
+                metrics.add(
+                    {"version_id": version_id, "artifact_id": artifact_id, "repo_id": repo_id}
+                    | version_metrics.as_row()
+                )
+                sections.extend(document_section_rows(document, version_id, artifact_id, repo_id))
+            clear_syllable_cache()
+        sections.flush()
+    finally:
+        sink.close()
+    return metrics.frame(), sections.height, outlines
 
 
 def document_section_rows(
@@ -355,13 +491,79 @@ def sample_artifact_ids(
     )
 
 
-def build_rq1_sections(tables: dict[str, pl.DataFrame], sections: pl.DataFrame) -> pl.DataFrame:
+def _rq1_chunks(
+    tables: dict[str, pl.DataFrame],
+    sections: pl.DataFrame | pl.LazyFrame,
+    keep: pl.DataFrame | None = None,
+) -> Iterator[pl.DataFrame]:
+    """``rq1_sections`` in order, ``_CHUNK_ROWS`` rows at a time (only artifacts in ``keep``,
+    when given). ``sections`` may be a scan of ``version_sections``: only HEAD rows are loaded.
+
+    The scan is filtered a slice at a time inside the query: joining it loaded every section of
+    every version (gigabytes), a filtered collect of the whole scan buffered far more than it
+    kept, and filtering a collected slice keeps the whole slice alive (polars strings share the
+    buffers of the frame they were filtered from). The order is computed on the keys alone, and
+    the rows are gathered a chunk at a time: sorting or joining the frame copies all the text."""
     heads = head_versions(tables).select(
-        "version_id", "full_name", "path", "tool", "kind", "scope", "skill_name"
+        "version_id", "artifact_id", "full_name", "path", "tool", "kind", "scope", "skill_name"
     )
-    return sections.join(heads, on="version_id", how="inner").sort(
-        "repo_id", "artifact_id", "position"
+    if keep is not None:
+        heads = heads.join(keep.select("artifact_id"), on="artifact_id", how="semi")
+    at_head = pl.col("version_id").is_in(heads["version_id"].drop_nulls().implode())
+    head_rows = pl.concat(
+        _scan_slices(sections.lazy(), _SECTIONS_SLICE_ROWS, at_head), how="vertical"
     )
+    order = (
+        head_rows.select("version_id", "repo_id", "artifact_id", "position")
+        .with_row_index("_row")
+        .join(heads.drop("artifact_id"), on="version_id", how="inner")
+        .sort("repo_id", "artifact_id", "position")
+    )
+    head_columns = heads.drop("version_id", "artifact_id").columns
+    for chunk in order.iter_slices(_CHUNK_ROWS) if order.height else [order]:
+        yield head_rows.select(pl.all().gather(chunk["_row"])).hstack(chunk.select(head_columns))
+
+
+def build_rq1_sections(
+    tables: dict[str, pl.DataFrame],
+    sections: pl.DataFrame | pl.LazyFrame,
+    keep: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Sections of the HEAD versions (of the artifacts in ``keep``, when given)."""
+    return pl.concat(_rq1_chunks(tables, sections, keep), how="vertical")
+
+
+def write_rq1_sections(
+    tables: dict[str, pl.DataFrame],
+    sections: pl.DataFrame | pl.LazyFrame,
+    path: Path,
+    keep: pl.DataFrame | None = None,
+) -> int:
+    """``build_rq1_sections`` written to ``path`` a chunk at a time (never whole in memory)."""
+    return _write_chunks(_rq1_chunks(tables, sections, keep), path)
+
+
+def _write_chunks(
+    chunks: Iterable[pl.DataFrame],
+    path: Path,
+    on_chunk: Callable[[pl.DataFrame], None] | None = None,
+) -> int:
+    """Write frames of one schema to ``path`` as they come (at least one frame is expected, so
+    the file always has the schema); returns the number of rows."""
+    sink: _ParquetSink | None = None
+    rows = 0
+    try:
+        for chunk in chunks:
+            if sink is None:
+                sink = _ParquetSink(path, dict(chunk.schema))
+            sink(chunk)
+            rows += chunk.height
+            if on_chunk is not None:
+                on_chunk(chunk)
+    finally:
+        if sink is not None:
+            sink.close()
+    return rows
 
 
 def build_rq2_structure(tables: dict[str, pl.DataFrame], metrics: pl.DataFrame) -> pl.DataFrame:
@@ -381,13 +583,27 @@ def build_author_roles(tables: dict[str, pl.DataFrame], config: AnalysisConfig) 
     )
     artifact_commit_count = dict(artifact_commits.iter_rows())
 
-    rows = []
+    rows = _FrameChunks(
+        {
+            "identity_id": pl.Int64,
+            "repo_id": pl.Int64,
+            "name": pl.Utf8,
+            "github_login": pl.Utf8,
+            "commits": pl.Int64,
+            "artifact_commits": pl.Int64,
+            "is_bot": pl.Boolean,
+            "agent": pl.Utf8,
+            "role": pl.Utf8,
+            "file_changes": pl.Int64,
+            **{f"share_{category.value}": pl.Float64 for category in FileCategory},
+        }
+    )
     for identity in tables["identities"].iter_rows(named=True):
         file_changes = changes_by_identity.get(identity["id"], {})
         shares = category_shares(file_changes)
         bot = is_bot(identity["name"], identity["email"], config)
         agent = detect_agent(identity["name"], identity["email"], config)
-        rows.append(
+        rows.add(
             {
                 "identity_id": identity["id"],
                 "repo_id": identity["repo_id"],
@@ -405,28 +621,121 @@ def build_author_roles(tables: dict[str, pl.DataFrame], config: AnalysisConfig) 
                 },
             }
         )
-    schema = {
-        "identity_id": pl.Int64,
-        "repo_id": pl.Int64,
-        "name": pl.Utf8,
-        "github_login": pl.Utf8,
-        "commits": pl.Int64,
-        "artifact_commits": pl.Int64,
-        "is_bot": pl.Boolean,
-        "agent": pl.Utf8,
-        "role": pl.Utf8,
-        "file_changes": pl.Int64,
-        **{f"share_{category.value}": pl.Float64 for category in FileCategory},
-    }
-    return pl.DataFrame(rows, schema=schema)
+    return rows.frame()
+
+
+_CO_CHANGED = ["co_changed_files", *(f"co_changed_{category.value}" for category in FileCategory)]
+_CHANGE_FILE_KEY = ["repo_id", "sha", "path"]
+
+
+def co_changed_counts(
+    commit_files: pl.DataFrame | pl.LazyFrame, keys: pl.DataFrame
+) -> pl.DataFrame:
+    """For each (repo_id, sha, path) of ``keys``: how many other files its commit changed, in
+    total and by category. ``commit_files`` has millions of rows: it is aggregated by polars
+    (streaming, when it is a scan), never loaded or looped over in Python."""
+
+    def counts(frame: pl.LazyFrame, by: list[str]) -> pl.DataFrame:
+        return (
+            frame.group_by(by)
+            .agg(
+                pl.len().cast(pl.Int64).alias("co_changed_files"),
+                *(
+                    (pl.col("file_category") == category.value)
+                    .sum()
+                    .cast(pl.Int64)
+                    .alias(f"co_changed_{category.value}")
+                    for category in FileCategory
+                ),
+            )
+            .collect(engine="streaming")
+        )
+
+    files = commit_files.lazy().select(*_CHANGE_FILE_KEY, "file_category")
+    keys = keys.select(_CHANGE_FILE_KEY).unique()
+    commits = keys.select("repo_id", "sha").unique()
+    per_commit = counts(
+        files.join(commits.lazy(), on=["repo_id", "sha"], how="semi"), ["repo_id", "sha"]
+    )
+    own = counts(files.join(keys.lazy(), on=_CHANGE_FILE_KEY, how="semi"), _CHANGE_FILE_KEY)
+    return (
+        keys.join(per_commit, on=["repo_id", "sha"], how="left")
+        .join(own, on=_CHANGE_FILE_KEY, how="left", suffix="_own")
+        .select(
+            *_CHANGE_FILE_KEY,
+            *(
+                (pl.col(column).fill_null(0) - pl.col(f"{column}_own").fill_null(0)).alias(column)
+                for column in _CO_CHANGED
+            ),
+        )
+    )
 
 
 def build_rq3_changes(
     tables: dict[str, pl.DataFrame],
-    documents: dict[tuple[int, str], ParsedDocument],
+    documents: dict[tuple[int, str], ParsedDocument | DocumentOutline],
     roles: pl.DataFrame,
     config: AnalysisConfig,
+    commit_files: pl.DataFrame | pl.LazyFrame | None = None,
+    keep: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
+    """Every artifact change (of the artifacts in ``keep``, when given).
+
+    ``commit_files`` defaults to ``tables["commit_files"]``; the analysis passes a scan
+    (``load_bronze`` does not load it). Only the commits of the changes are counted, so files
+    of commits removed by the history cut never matter."""
+    return pl.concat(
+        _rq3_chunks(tables, documents, roles, config, commit_files, keep), how="vertical"
+    )
+
+
+# What ``build_repo_features`` reads of ``rq3_changes`` (all that the analysis keeps of it).
+_RQ3_FEATURE_COLUMNS = ("repo_id", "sha", "authored_at", "in_burst", "agent_involved")
+
+
+def write_rq3_changes(
+    tables: dict[str, pl.DataFrame],
+    documents: dict[tuple[int, str], ParsedDocument | DocumentOutline],
+    roles: pl.DataFrame,
+    config: AnalysisConfig,
+    path: Path,
+    commit_files: pl.DataFrame | pl.LazyFrame | None = None,
+    keep: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """``build_rq3_changes`` written to ``path`` a chunk at a time (the commit messages make
+    the whole table large). Returns its ``_RQ3_FEATURE_COLUMNS``, for ``build_repo_features``."""
+    kept: list[pl.DataFrame] = []
+    _write_chunks(
+        _rq3_chunks(tables, documents, roles, config, commit_files, keep),
+        path,
+        lambda chunk: kept.append(chunk.select(_RQ3_FEATURE_COLUMNS)),
+    )
+    return pl.concat(kept, how="vertical")
+
+
+def _with_messages(rows: pl.DataFrame, messages: pl.DataFrame) -> pl.DataFrame:
+    """``rows`` with the message (and its subject) of their commit, in ``_RQ3_SCHEMA`` order."""
+    return (
+        rows.join(messages, on=["repo_id", "sha"], how="left", maintain_order="left")
+        .with_columns(pl.col("message").fill_null(""))
+        .with_columns(
+            pl.col("message").str.splitn("\n", 2).struct.field("field_0").alias("message_subject")
+        )
+        .select(list(_RQ3_SCHEMA))
+    )
+
+
+def _rq3_chunks(
+    tables: dict[str, pl.DataFrame],
+    documents: dict[tuple[int, str], ParsedDocument | DocumentOutline],
+    roles: pl.DataFrame,
+    config: AnalysisConfig,
+    commit_files: pl.DataFrame | pl.LazyFrame | None,
+    keep: pl.DataFrame | None,
+) -> Iterator[pl.DataFrame]:
+    """``rq3_changes`` in order, ``_CHUNK_ROWS`` rows at a time (at least one, maybe empty)."""
+    if commit_files is None:
+        commit_files = tables["commit_files"]
     commits = tables["commits"].select(
         "repo_id",
         "sha",
@@ -437,7 +746,6 @@ def build_rq3_changes(
         "author_email",
         "committer_name",
         "committer_email",
-        "message",
     )
     artifacts = tables["artifacts"].select(
         pl.col("id").alias("artifact_id"), "path", "tool", "kind", "scope", "skill_name"
@@ -446,8 +754,14 @@ def build_rq3_changes(
         tables["artifact_changes"]
         .join(commits, on=["repo_id", "sha"], how="inner")
         .join(artifacts, on="artifact_id", how="inner")
-        .sort("artifact_id", "authored_at", "committed_at", "sha")
     )
+    if keep is not None:
+        # Whole artifacts are kept or dropped, so the order and timing of the changes of a kept
+        # artifact are the same as without the filter.
+        changes = changes.join(keep.select("artifact_id"), on="artifact_id", how="semi")
+    changes = changes.join(
+        co_changed_counts(commit_files, changes), on=_CHANGE_FILE_KEY, how="left"
+    ).sort("artifact_id", "authored_at", "committed_at", "sha")
 
     coauthor_agents: dict[tuple[int, str], set[str]] = defaultdict(set)
     for row in tables["commit_coauthors"].iter_rows(named=True):
@@ -455,15 +769,18 @@ def build_rq3_changes(
         if agent:
             coauthor_agents[(row["repo_id"], row["sha"])].add(agent)
 
-    co_changed: dict[tuple[int, str], list[tuple[str, str]]] = defaultdict(list)
-    for row in tables["commit_files"].iter_rows(named=True):
-        co_changed[(row["repo_id"], row["sha"])].append((row["path"], row["file_category"]))
-
     role_by_identity = {
         row[0]: row[1:] for row in roles.select("identity_id", "role", "is_bot").iter_rows()
     }
 
-    rows: list[dict[str, Any]] = []
+    # The commit message is joined to each chunk of rows: it is most of the table (a commit that
+    # changes several artifacts repeats it), so it never goes through Python rows.
+    messages = tables["commits"].select("repo_id", "sha", "message")
+    done: list[pl.DataFrame] = []
+    rows = _FrameChunks(
+        {name: dtype for name, dtype in _RQ3_SCHEMA.items() if name not in _MESSAGE_COLUMNS},
+        done.append,
+    )
     previous_time: dict[int, Any] = {}
     change_index: dict[int, int] = defaultdict(int)
     for row in changes.iter_rows(named=True):
@@ -484,15 +801,6 @@ def build_rq3_changes(
         )
         diff = diff_documents(before, after) if comparable else None
 
-        others = [
-            (path, category)
-            for path, category in co_changed[(row["repo_id"], row["sha"])]
-            if path != row["path"]
-        ]
-        category_counts = {category.value: 0 for category in FileCategory}
-        for _, category in others:
-            category_counts[category] += 1
-
         author_agent = detect_agent(row["author_name"], row["author_email"], config)
         committer_agent = detect_agent(row["committer_name"], row["committer_email"], config)
         agents = sorted(
@@ -500,8 +808,7 @@ def build_rq3_changes(
             | {agent for agent in (author_agent, committer_agent) if agent}
         )
         role, bot = role_by_identity.get(row["author_identity_id"], (None, None))
-        message = row["message"] or ""
-        rows.append(
+        rows.add(
             {
                 "repo_id": row["repo_id"],
                 "artifact_id": artifact_id,
@@ -529,20 +836,24 @@ def build_rq3_changes(
                 "frontmatter_removed": diff.frontmatter_removed if diff else None,
                 "frontmatter_modified": diff.frontmatter_modified if diff else None,
                 "structural_change": diff.is_structural if diff else None,
-                "co_changed_files": len(others),
-                **{f"co_changed_{name}": count for name, count in category_counts.items()},
+                **{column: row[column] for column in _CO_CHANGED},
                 "author_identity_id": row["author_identity_id"],
                 "author_role": role,
                 "author_is_bot": bot,
                 "agents_involved": agents,
                 "agent_involved": bool(agents),
-                "message_subject": message.split("\n", 1)[0],
-                "message": message,
             }
         )
-    return pl.DataFrame(rows, schema=_RQ3_SCHEMA)
+        while done:
+            yield _with_messages(done.pop(0), messages)
+    rows.flush()
+    while done:
+        yield _with_messages(done.pop(0), messages)
+    if rows.height == 0:
+        yield _with_messages(pl.DataFrame(schema=rows.schema), messages)
 
 
+_MESSAGE_COLUMNS = ("message_subject", "message")
 _RQ3_SCHEMA = {
     "repo_id": pl.Int64,
     "artifact_id": pl.Int64,
@@ -699,8 +1010,8 @@ _STEPS = (
     "classifying authors",
     "selecting the study sample",
     "building RQ2 structure",
+    "building RQ1 sections",
     "building RQ3 changes",
-    "building RQ1 sections and repository features",
     "writing datasets",
 )
 
@@ -728,7 +1039,19 @@ def _build_into(
         tables, cutoff_stats = cut_history(tables, history_cutoff)
         logger.info("History cut at %s: %s", history_cutoff, cutoff_stats)
     step()
-    metrics, sections, documents = build_version_tables(tables, config, progress)
+    sections_path = output_dir / f"{SILVER_VERSION_SECTIONS}.parquet"
+    metrics, section_rows, documents = build_version_tables(
+        tables, read_version_contents(bronze_dir), config, sections_path, progress
+    )
+    counts = {SILVER_VERSION_SECTIONS: section_rows}
+
+    def write(name: str, frame: pl.DataFrame) -> None:
+        # Every output is written as soon as it is built, and the caller drops it unless a
+        # later step needs it: holding them all until the end added up to gigabytes.
+        frame.write_parquet(output_dir / f"{name}.parquet")
+        counts[name] = frame.height
+        logger.info("Wrote %s rows to %s", frame.height, name)
+
     step()
     roles = build_author_roles(tables, config)
     step()
@@ -736,34 +1059,34 @@ def _build_into(
     repository_sample = build_repository_sample(tables, artifact_sample, roles, config)
     in_sample = sample_artifact_ids(artifact_sample, repository_sample)
     sample_repos = repository_sample.filter(pl.col("in_sample")).select("repo_id")
+    write("silver_artifact_sample", artifact_sample)
+    write("rq3_author_roles", roles.join(sample_repos, on="repo_id", how="semi"))
 
     # Silver tables keep every artifact (sensitivity analyses can change the thresholds);
     # gold tables hold the study sample only.
     step()
     structure = build_rq2_structure(tables, metrics).join(in_sample, on="artifact_id", how="semi")
+    write("silver_version_metrics", metrics)
+    write("rq2_structure", structure)
+    del metrics
     step()
-    changes = build_rq3_changes(tables, documents, roles, config).join(
-        in_sample, on="artifact_id", how="semi"
+    rq1_rows = write_rq1_sections(
+        tables, pl.scan_parquet(sections_path), output_dir / "rq1_sections.parquet", in_sample
     )
+    counts["rq1_sections"] = rq1_rows
+    logger.info("Wrote %s rows to %s", rq1_rows, "rq1_sections")
     step()
-    outputs = {
-        "silver_version_metrics": metrics,
-        "silver_version_sections": sections,
-        "silver_artifact_sample": artifact_sample,
-        "rq1_sections": build_rq1_sections(tables, sections).join(
-            in_sample, on="artifact_id", how="semi"
-        ),
-        "rq2_structure": structure,
-        "rq3_changes": changes,
-        "rq3_author_roles": roles.join(sample_repos, on="repo_id", how="semi"),
-        "repo_features": build_repo_features(tables, structure, changes, roles, repository_sample),
-    }
+    path = output_dir / "rq3_changes.parquet"
+    commit_files = scan_bronze(bronze_dir, "commit_files")
+    changes = write_rq3_changes(tables, documents, roles, config, path, commit_files, in_sample)
+    del documents
+    counts["rq3_changes"] = changes.height
+    logger.info("Wrote %s rows to %s", changes.height, "rq3_changes")
     step()
-    counts = {}
-    for name, frame in outputs.items():
-        frame.write_parquet(output_dir / f"{name}.parquet")
-        counts[name] = frame.height
-        logger.info("Wrote %s rows to %s", frame.height, name)
+    write(
+        "repo_features",
+        build_repo_features(tables, structure, changes, roles, repository_sample),
+    )
     # The analysis never touches the database, so its provenance lives next to its outputs.
     manifest = {
         "created_at": datetime.now(UTC).isoformat(),

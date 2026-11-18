@@ -192,6 +192,24 @@ def test_gold_datasets(bronze: Path, tmp_path: Path) -> None:
     assert manifest["sample"]["sample_repositories"] == 1
 
 
+def test_gold_datasets_do_not_depend_on_chunk_sizes(
+    bronze: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Contents, sections and output rows go through memory in chunks; one row per chunk
+    must give the same datasets."""
+    from agm_miner.analysis import datasets
+
+    build_datasets(bronze, tmp_path / "default", EVERYTHING)
+    monkeypatch.setattr(datasets, "_CHUNK_ROWS", 1)
+    monkeypatch.setattr(datasets, "_SECTIONS_SLICE_ROWS", 1)
+    monkeypatch.setattr(datasets, "CONTENT_SLICE_ROWS", 1)
+    monkeypatch.setattr(datasets, "CONTENT_BATCH_ROWS", 1)
+    build_datasets(bronze, tmp_path / "chunked", EVERYTHING)
+    for path in sorted((tmp_path / "default").glob("*.parquet")):
+        chunked = pl.read_parquet(tmp_path / "chunked" / path.name)
+        assert chunked.equals(pl.read_parquet(path)), path.name
+
+
 def test_gold_datasets_cut_at_the_reference_date(bronze: Path, tmp_path: Path) -> None:
     output = tmp_path / "gold"
     counts = build_datasets(bronze, output, EVERYTHING, history_cutoff=date(2024, 3, 15))

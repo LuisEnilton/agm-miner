@@ -12,6 +12,7 @@ agm status              what is running now and how far it got (also from anothe
 agm runs list|funnel    inspect pipeline runs and the selection funnel
 agm rq1 ...             RQ1 content coding with an LLM (sample, propose, classify, validate)
 agm rq2 summary         RQ2 structure tables, optionally next to another dataset
+agm figures             the paper's figures as LaTeX (TikZ/pgfplots) from the analysis outputs
 agm help [COMMAND...]   list every command and what it does
 """
 
@@ -99,6 +100,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
 
     @functools.wraps(command)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        from agm_miner.analysis.paper_figures import FiguresInputError
         from agm_miner.analysis.sampling_audit import AuditOutputError
         from agm_miner.database.schema import SchemaMismatchError
         from agm_miner.git.runner import GitError
@@ -130,6 +132,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             raise typer.Exit(code=130) from exc
         except (
             AuditOutputError,
+            FiguresInputError,
             SchemaMismatchError,
             StageBusyError,
             GitError,
@@ -1154,6 +1157,78 @@ def rq2_summary(
             output_dir,
             min_bytes=study.analysis.min_artifact_bytes if min_bytes is None else min_bytes,
             compare_dir=compare,
+            code_version=code_version(),
+        )
+    )
+
+
+@app.command("figures")
+@_handle_errors
+def figures(
+    gold: Annotated[
+        Path | None,
+        typer.Option(help="Analysis output (default: the latest in DATA_DIR/gold)."),
+    ] = None,
+    audit_dir: Annotated[
+        Path | None,
+        typer.Option("--audit", help="Audit of the same export (default: DATA_DIR/audit/<gold>)."),
+    ] = None,
+    compare: Annotated[
+        Path | None,
+        typer.Option(
+            help="Imported Agent READMEs files (default: DATA_DIR/external/agentreadmes)."
+        ),
+    ] = None,
+    model: ModelOption = None,
+    codebook: CodebookOption = None,
+    labels: Annotated[
+        Path | None,
+        typer.Option(
+            help="RQ1 classify folder of the analysis (default: DATA_DIR/rq1/<gold>/classify/"
+            "<codebook>/<provider>/<model>)."
+        ),
+    ] = None,
+    compare_labels: Annotated[
+        Path | None,
+        typer.Option(
+            help="RQ1 classify folder of the Agent READMEs files (default: the same folder under "
+            "DATA_DIR/rq1/<compare name>)."
+        ),
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option(help="Output folder (default: DATA_DIR/figures/<gold>).")
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """The paper's figures (pipeline, QP2 elements, QP1 categories) as LaTeX macros in
+    figuras.tex, computed from the analysis, the audit and the RQ1 classification (no database).
+    """
+    from agm_miner.analysis.datasets import latest_analysis
+    from agm_miner.analysis.paper_figures import write_figures
+    from agm_miner.rq1.codebook import load_codebook
+    from agm_miner.rq1.stages import model_slug
+    from agm_miner.runs import code_version
+
+    settings, study = _context(study_path)
+    study = _with_model(study, model)
+    gold_dir = gold or latest_analysis(settings.gold_dir)
+    compare_dir = compare or settings.external_dir / "agentreadmes"
+    loaded = load_codebook(codebook or study.rq1.codebook)
+
+    def classify_dir(dataset: Path) -> Path:
+        folder = settings.rq1_dir / dataset.name / "classify" / model_slug(loaded.label)
+        return folder / study.rq1.provider / model_slug(study.rq1.classify_model)
+
+    _print(
+        write_figures(
+            gold_dir=gold_dir,
+            audit_dir=audit_dir or settings.data_dir / "audit" / gold_dir.name,
+            compare_dir=compare_dir,
+            labels_dir=labels or classify_dir(gold_dir),
+            compare_labels_dir=compare_labels or classify_dir(compare_dir),
+            output_dir=output or settings.data_dir / "figures" / gold_dir.name,
+            categories=loaded.ids,
+            names={category.id: category.name for category in loaded.categories},
             code_version=code_version(),
         )
     )

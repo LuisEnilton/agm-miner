@@ -40,6 +40,7 @@ poetry run agm rq1 classify | saturation   # RQ1: categorias de todas as seçõe
 poetry run agm rq1 validate export | llm | score   # RQ1: planilha cega, réplicas, kappa
 poetry run agm rq1 compare --model p:m --model p:m # RQ1: dois classificadores comparados
 poetry run agm rq2 summary [--compare DIR]  # RQ2: tabelas de estrutura (lado a lado com outro gold)
+poetry run agm figures --model p:m --codebook F  # figuras do artigo (TikZ/pgfplots) em figuras.tex
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
 poetry run ruff check . && poetry run ruff format .
@@ -72,7 +73,9 @@ src/agm_miner/
                       # descoberta, efeito de cada critério, falhas e cobertura dos artefatos a
                       # partir do bronze; agm audit), audit_latex (macros, tabelas e rascunho
                       # em LaTeX da auditoria, para o artigo; toda macro usada no rascunho
-                      # precisa existir no audit.tex)
+                      # precisa existir no audit.tex), paper_figures (figuras do artigo em
+                      # TikZ/pgfplots, uma macro por figura no figuras.tex; agm figures;
+                      # porcentagens arredondadas uma vez, das contagens exatas)
   rq1/                # RQ1 com LLM: units (section_key), sampling, codebook, llm (SDK anthropic,
                       # Batches), store (cache + estado dos lotes), execution (lotes retomáveis),
                       # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)

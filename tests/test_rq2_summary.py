@@ -103,11 +103,11 @@ def test_describe_gives_shares_bins_and_readability() -> None:
     claude = prepare(STRUCTURE, min_bytes=2048).filter(pl.col("file_type") == "CLAUDE.md")
     result = describe(claude)
     assert result["files"] == 3 and result["repositories"] == 1
-    assert result["with_element"]["code_blocks"] == pytest.approx(0.333)
+    assert result["with_element"]["code_blocks"] == pytest.approx(1 / 3, abs=1e-6)
     assert result["words_bins"] == {
-        "<250": 0.333,
-        "250-499": 0.333,
-        "500-999": 0.333,
+        "<250": 0.333333,
+        "250-499": 0.333333,
+        "500-999": 0.333333,
         ">=1000": 0.0,
     }
     assert result["size"]["words"]["median"] == 300
@@ -126,7 +126,7 @@ def test_summarize_cuts_and_frontmatter() -> None:
     assert summary["cuts"]["all/repositories"]["CLAUDE.md"]["files"] == 1
     assert summary["cuts"]["root/files"]["CLAUDE.md"]["files"] == 1
     assert "SKILL.md" not in summary["cuts"]["root/files"]  # the skill is nested
-    assert summary["scope_shares"]["CLAUDE.md"] == pytest.approx(0.333)
+    assert summary["scope_shares"]["CLAUDE.md"] == pytest.approx(1 / 3, abs=1e-6)
     skill = summary["cuts"]["all/files"]["SKILL.md"]
     assert skill["frontmatter"] == {
         "with_frontmatter": 1.0,
@@ -175,3 +175,22 @@ def test_write_summary_and_command(tmp_path: Path, monkeypatch) -> None:
     assert done.exit_code == 0, done.output
     output = json.loads(done.output[done.output.index("{") :])["output"]
     assert output == str(tmp_path / "rq2" / "20261116T000000Z__vs__paper")
+
+
+def test_shares_keep_enough_digits_for_a_single_rounding() -> None:
+    # 5552 of 7989 files have links: 69.496%. A share stored with 3 digits (0.695) would be
+    # shown as 70%; the report and any reader must get 69%.
+    rows = [row(artifact_id=i, repo_id=i, links=1 if i < 5552 else 0) for i in range(7989)]
+    files = prepare(
+        pl.DataFrame(
+            rows,
+            schema_overrides={
+                "frontmatter_keys": pl.List(pl.Utf8),
+                "frontmatter_valid": pl.Boolean,
+            },
+        ),
+        0,
+    )
+    share = describe(files)["with_element"]["links"]
+    assert share == pytest.approx(5552 / 7989, abs=1e-6)
+    assert f"{100 * share:.0f}" == "69"

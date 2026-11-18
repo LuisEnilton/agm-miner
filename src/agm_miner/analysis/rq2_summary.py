@@ -96,6 +96,20 @@ def _round(value: float | None, digits: int = 3) -> float | None:
     return None if value is None else round(float(value), digits)
 
 
+# Shares keep 6 digits: readers round them once more for display (e.g. to an integer
+# percentage), and rounding a share first to 3 digits makes that second rounding wrong at the
+# boundaries (5552/7989 = 0.69496 -> 0.695 -> "70%" instead of "69%").
+SHARE_DIGITS = 6
+
+
+def _share(part: float, whole: float) -> float:
+    return round(float(part) / whole, SHARE_DIGITS)
+
+
+def _ratio(value: float | None) -> float | None:
+    return _round(value, SHARE_DIGITS)
+
+
 def _distribution(column: pl.Series) -> dict[str, float | None]:
     values = column.drop_nulls()
     if values.is_empty():
@@ -117,7 +131,7 @@ def _bins(values: pl.Series, edges: Sequence[int]) -> dict[str, float]:
         index = sum(1 for edge in edges if value >= edge)
         counts[labels[index]] += 1
     total = len(values) or 1
-    return {label: round(counts[label] / total, 3) for label in labels}
+    return {label: _share(counts[label], total) for label in labels}
 
 
 def _frontmatter(files: pl.DataFrame) -> dict[str, Any]:
@@ -125,13 +139,13 @@ def _frontmatter(files: pl.DataFrame) -> dict[str, Any]:
     valid = with_frontmatter.filter(pl.col("frontmatter_valid").fill_null(False))
     keys = Counter(key for keys in valid["frontmatter_keys"].to_list() for key in keys or [])
     return {
-        "with_frontmatter": _round(with_frontmatter.height / files.height)
+        "with_frontmatter": _ratio(with_frontmatter.height / files.height)
         if files.height
         else None,
-        "valid_among_with_frontmatter": _round(valid.height / with_frontmatter.height)
+        "valid_among_with_frontmatter": _ratio(valid.height / with_frontmatter.height)
         if with_frontmatter.height
         else None,
-        "keys": {key: round(n / valid.height, 3) for key, n in keys.most_common()}
+        "keys": {key: _share(n, valid.height) for key, n in keys.most_common()}
         if valid.height
         else {},
     }
@@ -148,7 +162,7 @@ def describe(files: pl.DataFrame) -> dict[str, Any]:
         "size": {metric: _distribution(files[metric]) for metric in SIZE_METRICS},
         "words_bins": _bins(files["words"].fill_null(0), WORD_BINS) if n else {},
         "max_heading_depth": {
-            str(level) if level < 4 else "4+": _round(
+            str(level) if level < 4 else "4+": _ratio(
                 (depth.clip(upper_bound=4) == level).sum() / n
             )
             for level in range(5)
@@ -156,7 +170,7 @@ def describe(files: pl.DataFrame) -> dict[str, Any]:
         if n
         else {},
         "with_element": {
-            element: _round((files[element].fill_null(0) > 0).sum() / n) if n else None
+            element: _ratio((files[element].fill_null(0) > 0).sum() / n) if n else None
             for element in ELEMENTS
         },
         "per_file": {element: _distribution(files[element]) for element in ELEMENTS},
@@ -182,7 +196,7 @@ def size_bands(files: pl.DataFrame, elements: Sequence[str] = ELEMENTS) -> dict[
         result[label] = {
             "files": group.height,
             **{
-                element: _round((group[element].fill_null(0) > 0).sum() / group.height)
+                element: _ratio((group[element].fill_null(0) > 0).sum() / group.height)
                 if group.height
                 else None
                 for element in elements
@@ -200,7 +214,7 @@ def summarize(structure: pl.DataFrame, *, min_bytes: int) -> dict[str, Any]:
         "files": files.height,
         "repositories": files["repo_id"].n_unique(),
         "scope_shares": {
-            file_type: _round(
+            file_type: _ratio(
                 files.filter(
                     (pl.col("file_type") == file_type) & (pl.col("scope") == "ROOT")
                 ).height

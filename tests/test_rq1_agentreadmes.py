@@ -576,9 +576,14 @@ def test_agentreadmes_commands(tmp_path: Path, monkeypatch) -> None:
     model = ["--model", "openrouter:fake-model"]
     classified = runner.invoke(
         app,
-        ["rq1", "classify", "--gold", str(gold), "--codebook", str(SEED), "--unit", "file"] + model,
+        ["rq1", "classify", "--gold", str(gold), "--codebook", str(SEED), "--unit", "file"]
+        + ["--kind", "INSTRUCTION"]
+        + model,
     )
     assert classified.exit_code == 0, classified.output
+    assert json.loads(classified.output[classified.output.index("{") :])["only_kinds"] == [
+        "INSTRUCTION"
+    ]
     assert (output / "classify-file" / "agent_readmes_2025").exists()
     by_file = runner.invoke(
         app, ["rq1", "agentreadmes", "score", "--codebook", str(SEED), "--unit", "file"] + model

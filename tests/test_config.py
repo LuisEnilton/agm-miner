@@ -20,6 +20,19 @@ def test_repository_study_file_is_valid() -> None:
     assert "filename:AGENTS.md" in config.discovery.queries
 
 
+def test_repository_study_file_records_the_final_rq1_collection() -> None:
+    # The paper's classification: Claude Sonnet 5.5 (effort low) with the Agent READMEs codebook.
+    # Whoever replicates from study.yaml must not run another model by default.
+    rq1 = load_study_config(PROJECT_ROOT / "study.yaml").rq1
+    assert (rq1.provider, rq1.classify_model, rq1.classify_effort) == (
+        "anthropic",
+        "claude-sonnet-5-5",
+        "low",
+    )
+    assert rq1.codebook == Path("codebooks/seed_agent_readmes.yaml")
+    assert rq1.chunk_sections == 30
+
+
 def test_partial_file_overrides_only_given_keys(tmp_path: Path) -> None:
     path = tmp_path / "study.yaml"
     path.write_text("selection:\n  min_stars: 100\n  reference_date: 2026-01-31\n")

@@ -217,6 +217,37 @@ def test_classify_limit_runs_a_pilot(tmp_path: Path) -> None:
     assert len(backend.asked) == 2 and summary["coverage"] == 0.25
 
 
+def test_classify_only_some_artifact_kinds(tmp_path: Path) -> None:
+    gold, output, config = setup(tmp_path, classify_model="fake-model", chunk_sections=10)
+    sections_path = gold / "rq1_sections.parquet"
+    resource = pl.when(pl.col("repo_id").is_in([0, 1])).then(pl.lit("SKILL_RESOURCE"))
+    # One file per artifact (a path of its own), as in a real analysis output.
+    pl.read_parquet(sections_path).with_columns(
+        resource.otherwise(pl.col("kind")).alias("kind"),
+        (pl.col("artifact_id").cast(pl.Utf8) + "/AGENTS.md").alias("path"),
+    ).write_parquet(sections_path)
+
+    backend = FakeBackend()
+    summary = classify_sections(
+        gold,
+        output,
+        config,
+        backend,
+        codebook_path=codebook_file(tmp_path),
+        kinds=["INSTRUCTION", "SKILL_MANIFEST"],
+    )
+    assert summary["only_kinds"] == ["INSTRUCTION", "SKILL_MANIFEST"]
+    assert summary["requests_planned"] == len(backend.asked) == 60 and summary["coverage"] == 1.0
+    labels = pl.read_parquet(Path(summary["output"]) / "section_labels.parquet")
+    assert labels.height == 60 and not set(labels["repo_id"]) & {0, 1}
+
+    everything = FakeBackend()
+    summary = classify_sections(
+        gold, output, config, everything, codebook_path=codebook_file(tmp_path)
+    )
+    assert summary["only_kinds"] is None and len(everything.asked) == 20  # the rest is cached
+
+
 def test_saturation_uses_a_fresh_sample(tmp_path: Path) -> None:
     gold, output, config = setup(tmp_path, classify_model="fake-model", saturation_size=20)
     summary = saturation(gold, output, config, FakeBackend(), codebook_path=codebook_file(tmp_path))

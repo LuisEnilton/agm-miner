@@ -572,7 +572,10 @@ versão (`propose-v2`, `induce-v1`, `align-v1`, `map-v1`): mudar o texto de um p
    requisição leva até `rq1.chunk_sections` seções de um mesmo arquivo; o `system` traz as
    instruções e o codebook inteiro (igual em todas as requisições) e avisa que o conteúdo das
    seções é dado a classificar, não instrução a seguir. Cada seção recebe uma ou mais categorias,
-   ou `other`. `--limit N` faz um piloto com N requisições. Saídas em
+   ou `other`. `--limit N` faz um piloto com N requisições. `--kind` (repetível) restringe a
+   classificação a tipos de artefato: `--kind INSTRUCTION --kind SKILL_MANIFEST` deixa de fora
+   os arquivos de recurso das Skills, que são documentação de apoio e não instruções ao agente.
+   Rodar depois sem `--kind` reaproveita do cache tudo o que já foi classificado. Saídas em
    `classify/<codebook>/<provedor>/<modelo>/`:
    - `section_labels.parquet`: uma linha por seção e categoria;
    - `artifact_labels.parquet`: por arquivo e categoria, seções, palavras e fração das palavras;

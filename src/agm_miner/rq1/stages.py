@@ -727,11 +727,12 @@ def classify_sections(
     codebook_path: Path,
     limit: int | None = None,
     artifact_ids: Collection[int] | None = None,
+    kinds: Collection[str] | None = None,
     progress: Progress | None = None,
 ) -> dict[str, Any]:
     """Categories of every section with text, sent file by file (``limit`` requests at most;
-    only the files in ``artifact_ids``, when given). Requests are built per file, so a later
-    run over more files reuses the answers already cached."""
+    only the files in ``artifact_ids`` and of the artifact ``kinds``, when given). Requests are
+    built per file, so a later run over more files reuses the answers already cached."""
     with run_lock(output_dir):
         return _classify_sections(
             gold_dir,
@@ -741,6 +742,7 @@ def classify_sections(
             codebook_path,
             limit,
             artifact_ids,
+            kinds,
             progress or Progress(),
         )
 
@@ -753,12 +755,15 @@ def _classify_sections(
     codebook_path: Path,
     limit: int | None,
     artifact_ids: Collection[int] | None,
+    kinds: Collection[str] | None,
     progress: Progress,
 ) -> dict[str, Any]:
     codebook = load_codebook(codebook_path)
     units = load_units(gold_dir)
     if artifact_ids is not None:
         units = units.filter(pl.col("artifact_id").is_in(list(artifact_ids)))
+    if kinds is not None:
+        units = units.filter(pl.col("kind").is_in(list(kinds)))
     distinct = distinct_units(units)
     chunks = file_chunks(distinct, config.chunk_sections)
     selected = chunks if limit is None else chunks[:limit]
@@ -791,6 +796,7 @@ def _classify_sections(
         "distinct_sections": distinct.height,
         "files": units["artifact_id"].n_unique(),
         "only_files": None if artifact_ids is None else len(set(artifact_ids)),
+        "only_kinds": None if kinds is None else sorted(set(kinds)),
         "requests_planned": len(chunks),
         "limit": limit,
         "distinct_sections_labelled": labelled,
@@ -830,6 +836,7 @@ def classify_files(
     codebook_path: Path,
     limit: int | None = None,
     artifact_ids: Collection[int] | None = None,
+    kinds: Collection[str] | None = None,
     progress: Progress | None = None,
 ) -> dict[str, Any]:
     """Categories of every whole file, one request per file (the strategy of the Agent READMEs
@@ -844,6 +851,7 @@ def classify_files(
             codebook_path,
             limit,
             artifact_ids,
+            kinds,
             progress or Progress(),
         )
 
@@ -856,12 +864,15 @@ def _classify_files(
     codebook_path: Path,
     limit: int | None,
     artifact_ids: Collection[int] | None,
+    kinds: Collection[str] | None,
     progress: Progress,
 ) -> dict[str, Any]:
     codebook = load_codebook(codebook_path)
     files = load_file_contents(gold_dir)
     if artifact_ids is not None:
         files = files.filter(pl.col("artifact_id").is_in(list(artifact_ids)))
+    if kinds is not None:
+        files = files.filter(pl.col("kind").is_in(list(kinds)))
     rows = files.to_dicts()
     with_content = [row for row in rows if row["content"].strip()]
     selected = with_content if limit is None else with_content[:limit]
@@ -929,6 +940,7 @@ def _classify_files(
         "files": files.height,
         "files_without_content": files.height - len(with_content),
         "only_files": None if artifact_ids is None else len(set(artifact_ids)),
+        "only_kinds": None if kinds is None else sorted(set(kinds)),
         "requests_planned": len({key for key in key_of.values()}),
         "limit": limit,
         "files_labelled": frame.height,

@@ -835,6 +835,15 @@ def rq1_classify(
             "as Agent READMEs): what `agentreadmes score` needs, for a fraction of the cost."
         ),
     ] = False,
+    kind: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--kind",
+            click_type=click.Choice(["INSTRUCTION", "SKILL_MANIFEST", "SKILL_RESOURCE"]),
+            help="Only artifacts of this kind (repeatable), e.g. --kind INSTRUCTION --kind "
+            "SKILL_MANIFEST to leave out the skills' resource files.",
+        ),
+    ] = None,
     unit: UnitOption = "section",
     model: ModelOption = None,
     study_path: StudyOption = None,
@@ -859,6 +868,7 @@ def rq1_classify(
             codebook_path=codebook or study.rq1.codebook,
             limit=limit,
             artifact_ids=labelled_artifact_ids(gold_dir) if only_labelled else None,
+            kinds=kind,
             progress=progress,
         ),
         model,

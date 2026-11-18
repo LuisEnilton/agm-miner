@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -190,6 +190,31 @@ def test_gold_datasets(bronze: Path, tmp_path: Path) -> None:
     assert manifest["bronze_manifest"]["schema_revision"] == alembic_head()
     assert manifest["outputs"]["rq3_changes"] == counts["rq3_changes"]
     assert manifest["sample"]["sample_repositories"] == 1
+
+
+def test_gold_datasets_cut_at_the_reference_date(bronze: Path, tmp_path: Path) -> None:
+    output = tmp_path / "gold"
+    counts = build_datasets(bronze, output, EVERYTHING, history_cutoff=date(2024, 3, 15))
+    # The skill was added on 2024-04-01, after the cutoff: it did not exist yet.
+    assert counts["rq2_structure"] == 1
+    rq2 = pl.read_parquet(output / "rq2_structure.parquet")
+    assert rq2["path"].to_list() == ["CLAUDE.md"] and rq2["h2"].to_list() == [2]
+    rq3 = pl.read_parquet(output / "rq3_changes.parquet")
+    assert rq3["path"].to_list() == ["CLAUDE.md", "CLAUDE.md"]
+    features = pl.read_parquet(output / "repo_features.parquet").row(0, named=True)
+    assert features["skills"] == 0 and features["artifact_changes"] == 2
+    # Monthly activity stops at March. The agent (first commit on 2024-03-20) had not committed
+    # yet and is dropped; Ana's commit total still counts her 2024-04-01 commit, because
+    # per-author totals cover the whole clone (4 by Ana + 1 by the bot).
+    assert features["active_months"] == 1 and features["total_commits"] == 5
+    manifest = json.loads((output / "analysis_manifest.json").read_text())
+    history = manifest["history_cutoff"]
+    assert history["reference_date"] == "2024-03-15"
+    assert history["commits_after_cutoff"] == 1 and history["artifacts_not_yet_created"] == 1
+
+    uncut = tmp_path / "uncut"
+    build_datasets(bronze, uncut, EVERYTHING)
+    assert json.loads((uncut / "analysis_manifest.json").read_text())["history_cutoff"] is None
 
 
 def test_gold_datasets_hold_only_the_study_sample(bronze: Path, tmp_path: Path) -> None:

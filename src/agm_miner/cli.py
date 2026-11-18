@@ -306,7 +306,13 @@ def analyze(
     bronze_dir = bronze or latest_export(settings.bronze_dir)
     output_dir = output or settings.gold_dir / bronze_dir.name
     with publishing(Progress("ANALYZE")) as progress, _showing_progress():
-        counts = build_datasets(bronze_dir, output_dir, study.analysis, progress)
+        counts = build_datasets(
+            bronze_dir,
+            output_dir,
+            study.analysis,
+            progress,
+            history_cutoff=study.history_cutoff(),
+        )
     _print({"output": str(output_dir), **counts})
 
 

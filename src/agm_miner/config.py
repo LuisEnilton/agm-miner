@@ -218,8 +218,7 @@ class AnalysisConfig(_StrictModel):
     # bot_patterns nor agent_patterns) in its whole history.
     min_human_contributors: int = 2
     # Cut the mined history at the end of selection.reference_date (analysis/history_cutoff.py),
-    # so every repository is seen at the same instant however late it was mined. `agm audit`
-    # reports what the cut removes; `agm analyze` does not apply it yet.
+    # so every repository is seen at the same instant however late it was mined.
     truncate_at_reference_date: bool = False
     # Author role thresholds, expressed as share of the author's file changes.
     docs_focused_min_share: float = 0.8

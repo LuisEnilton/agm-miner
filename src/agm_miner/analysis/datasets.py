@@ -24,13 +24,14 @@ import json
 import logging
 import shutil
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
 from agm_miner.analysis.authors import author_role, category_shares, detect_agent, is_bot
+from agm_miner.analysis.history_cutoff import cut_history
 from agm_miner.analysis.markdown import ParsedDocument, count_words
 from agm_miner.analysis.metrics import compute_metrics
 from agm_miner.analysis.structure_diff import diff_documents
@@ -668,17 +669,22 @@ def build_datasets(
     output_dir: Path,
     config: AnalysisConfig,
     progress: Progress | None = None,
+    *,
+    history_cutoff: date | None = None,
 ) -> dict[str, int]:
     """Write every dataset to ``output_dir``, replacing it only once all files are complete.
 
-    The analysis never touches the database, so ``progress`` is only shown by the terminal that
-    runs it.
+    With ``history_cutoff`` the bronze tables are first cut at the end of that date
+    (``history_cutoff.cut_history``). The analysis never touches the database, so ``progress``
+    is only shown by the terminal that runs it.
     """
     staging = output_dir.with_name(output_dir.name + ".partial")
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
     try:
-        counts = _build_into(bronze_dir, staging, config, progress or Progress("ANALYZE"))
+        counts = _build_into(
+            bronze_dir, staging, config, progress or Progress("ANALYZE"), history_cutoff
+        )
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -700,7 +706,11 @@ _STEPS = (
 
 
 def _build_into(
-    bronze_dir: Path, output_dir: Path, config: AnalysisConfig, progress: Progress
+    bronze_dir: Path,
+    output_dir: Path,
+    config: AnalysisConfig,
+    progress: Progress,
+    history_cutoff: date | None,
 ) -> dict[str, int]:
     progress.set_total("steps", len(_STEPS))
     steps = iter(_STEPS)
@@ -713,6 +723,10 @@ def _build_into(
 
     step()
     tables = load_bronze(bronze_dir)
+    cutoff_stats = None
+    if history_cutoff is not None:
+        tables, cutoff_stats = cut_history(tables, history_cutoff)
+        logger.info("History cut at %s: %s", history_cutoff, cutoff_stats)
     step()
     metrics, sections, documents = build_version_tables(tables, config, progress)
     step()
@@ -757,6 +771,8 @@ def _build_into(
         "bronze_dir": str(bronze_dir),
         "bronze_manifest": read_manifest(bronze_dir),
         "analysis_config": config.model_dump(mode="json"),
+        # None when the history was not cut; otherwise the date and what the cut removed.
+        "history_cutoff": cutoff_stats,
         "sample": _sample_funnel(repository_sample, artifact_sample, in_sample),
         "outputs": counts,
     }

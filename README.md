@@ -832,6 +832,48 @@ Depois de uma nova coleta (`agm export && agm audit`), basta trocar o `audit.tex
 para todos os números do texto e das tabelas se atualizarem. O comentário no topo do arquivo
 registra o export, o `code_version` e o hash do `study.yaml` de onde os números vieram.
 
+## Figuras do artigo (LaTeX)
+
+`agm figures` gera as figuras do artigo em LaTeX puro (TikZ e pgfplots), porque a sincronização
+com o Overleaf só leva arquivos de texto. Ele lê apenas saídas de outros comandos (sem banco) e
+grava `DATA_DIR/figures/<gold>/figuras.tex`, com uma macro por figura, cada uma com o ambiente
+`figure` completo, legenda e rótulo:
+
+- `\figPipeline` (`fig:pipeline`): fluxograma das etapas, com os repositórios descobertos,
+  avaliados, selecionados e minerados (do `audit.json` do mesmo export) e os arquivos e
+  repositórios analisados (do `rq2_structure`, com os filtros do `agm rq2 summary`);
+- `\figElementos` (`fig:elementos`): porcentagem dos `CLAUDE.md` e `AGENTS.md` com tabelas,
+  blocos de código, listas numeradas, listas com marcadores e links, na nossa amostra e nos
+  arquivos do *Agent READMEs* (o `rq2_structure` do `--compare`, padrão
+  `DATA_DIR/external/agentreadmes`);
+- `\figPrevalencia` (`fig:prevalencia`): mapa de calor com a porcentagem de arquivos com cada
+  categoria da QP1, nas colunas Todos, Raiz (o arquivo da raiz de cada repositório, escolhido
+  por `one_per_repository`) e AR (os arquivos rotulados do *Agent READMEs*, classificados pelo
+  mesmo modelo). Usa o `artifact_labels.parquet` do `classify` da nossa amostra e o
+  `section_labels.parquet` do `classify` do *Agent READMEs*.
+
+As pastas do `classify` saem do `--model` e do `--codebook` (como nos comandos da RQ1), ou de
+`--labels` e `--compare-labels`:
+
+```bash
+poetry run agm figures --model anthropic:claude-sonnet-5-5 \
+  --codebook codebooks/seed_agent_readmes.yaml
+```
+
+Cada porcentagem é arredondada uma única vez, a partir das contagens exatas (2031/7977 =
+25,46% vira 25, e não 26 como no arredondamento de 0,255). Os números seguem o formato
+brasileiro (`5.037`). As figuras usam só tons de cinza, como pede a SBC, e cabem nos 15 cm de
+texto do template. O comentário no topo do arquivo registra as entradas e diz o que o preâmbulo
+precisa:
+
+```latex
+\usepackage{pgfplots}       % carrega o TikZ
+\pgfplotsset{compat=1.18}
+\input{figuras}
+...
+\figPipeline                % no texto, onde a figura deve ficar
+```
+
 ## Testes
 
 ```bash

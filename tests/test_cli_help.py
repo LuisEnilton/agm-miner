@@ -15,6 +15,7 @@ def test_help_lists_every_command_with_its_summary() -> None:
         "mine",
         "analyze",
         "audit",
+        "figures",
         "runs funnel",
         "rq1 classify",
         "rq1 validate score",

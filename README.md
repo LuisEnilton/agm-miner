@@ -36,8 +36,9 @@ agm discover → agm select → agm mine → agm export → agm analyze
    `data/gold/<timestamp>/` as tabelas `rq1_sections`, `rq2_structure`, `rq3_changes`,
    `rq3_author_roles` e `repo_features`. As tabelas gold contêm só a amostra do estudo (critérios
    que dependem do histórico minerado); as silver guardam tudo. O conteúdo das versões é lido em
-   lotes e as seções vão para o disco à medida que são geradas, então o pico de memória não
-   cresce com o tamanho do export. Para garantir que um erro de memória derrube só o analyze, e
+   lotes e as seções vão para o disco à medida que são geradas, então nem o conteúdo nem as
+   seções ficam inteiros na memória; as demais tabelas do bronze (como `commits`, com as
+   mensagens) ainda são carregadas, e o pico cresce com elas. Para garantir que um erro de memória derrube só o analyze, e
    não o VS Code junto (no WSL os dois dividem a mesma VM), rode com um teto:
    `systemd-run --user --scope -p MemoryMax=5G poetry run agm analyze`.
 

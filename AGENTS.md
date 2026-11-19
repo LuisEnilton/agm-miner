@@ -30,7 +30,7 @@ poetry run agm export               # 4. banco → data/bronze/<timestamp>/*.par
 poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silver + gold por RQ)
 poetry run agm audit                # bronze → data/audit/<export>/: vieses (json, md e LaTeX)
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
-poetry run agm help [comando...]    # lista todos os comandos e o que fazem
+poetry run agm help [comando...]    # lista todos os comandos por painel e o que fazem
 poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
 poetry run agm runs cleanup         # RUNNING sem heartbeat há > --minutes vira INTERRUPTED
@@ -54,7 +54,9 @@ se o HEAD mudou), `--force` e `--keep-clones`.
 
 ```
 src/agm_miner/
-  cli.py              # comandos Typer; erros esperados viram mensagem de uma linha
+  cli/                # comandos Typer: common (apps, painéis, helpers), pipeline, results,
+                      # rq1, ops; erros esperados viram mensagem de uma linha. Todo comando
+                      # novo declara rich_help_panel (teste em test_cli_help.py)
   config.py           # Settings (.env: infra/segredos) + StudyConfig (study.yaml: metodologia)
   artifacts.py        # FONTE ÚNICA das regras de artefato (classify_path, GIT_PATHSPECS)
   file_categories.py  # categoria de qualquer arquivo (code, test, docs, ci, agent_artifact, ...)

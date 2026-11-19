@@ -107,7 +107,7 @@ def rq1_models(
 ) -> None:
     """Models available for testing: Gemini models of your key (which are free: AI Studio) or
     free OpenRouter models that accept structured outputs. Both lists change often."""
-    from agm_miner.rq1.backends import list_free_structured_models, list_gemini_models
+    from agm_miner.rq1.backends import list_free_structured_models
     from agm_miner.rq1.llm import LLMAuthError
 
     settings, study = _context(study_path)
@@ -115,7 +115,7 @@ def rq1_models(
     if chosen == "openrouter":
         _print(list_free_structured_models())
     elif chosen == "gemini":
-        from google import genai
+        from agm_miner.rq1.gemini import genai, list_gemini_models  # optional `gemini` extra
 
         if settings.gemini_api_key is None:
             raise LLMAuthError("GEMINI_API_KEY is not set in .env")

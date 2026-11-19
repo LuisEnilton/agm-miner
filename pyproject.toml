@@ -22,9 +22,12 @@ dependencies = [
 	"scipy (>=1.11)",
 	"rich (>=13.8)",
 	"anthropic (>=2.1.0,<3.0.0)",
-	"google-genai (>=2.33.0,<3.0.0)",
 	"linkify-it-py (>=2.0)",
 ]
+
+[project.optional-dependencies]
+# Gemini was only used to test the pipeline on the free tier; the final collection used Anthropic.
+gemini = ["google-genai (>=2.33.0,<3.0.0)"]
 
 [project.scripts]
 agm = "agm_miner.cli:app"
@@ -35,7 +38,6 @@ packages = [{ include = "agm_miner", from = "src" }]
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.0"
 ruff = ">=0.6"
-ipykernel = "^7.3.0"
 
 [build-system]
 requires = ["poetry-core>=1.9.0"]

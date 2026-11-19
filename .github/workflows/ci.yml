@@ -32,7 +32,7 @@ jobs:
       - name: Install Poetry
         run: pipx install poetry
       - name: Install dependencies
-        run: poetry install
+        run: poetry install --all-extras
       - name: Lint
         run: |
           poetry run ruff check .

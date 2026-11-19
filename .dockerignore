@@ -1,0 +1,18 @@
+# Only the code, the configuration and the migrations go into the image.
+.git
+.github
+.claude
+.vscode
+.venv
+.env
+.env.*
+!.env.sample
+data
+dataset
+Artigos
+tests
+**/__pycache__
+.pytest_cache
+.ruff_cache
+*.json
+!src/**/*.json

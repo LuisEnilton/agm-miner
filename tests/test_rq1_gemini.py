@@ -12,15 +12,14 @@ from typing import Any
 
 import httpx
 import pytest
+
+pytest.importorskip("google.genai", reason="the optional `gemini` extra is not installed")
+
 from google.genai import errors, types
 
 from agm_miner.config import Rq1Config, Settings
-from agm_miner.rq1.backends import (
-    DailyLimitError,
-    GeminiBackend,
-    list_gemini_models,
-    make_backend,
-)
+from agm_miner.rq1.backends import DailyLimitError, make_backend
+from agm_miner.rq1.gemini import GeminiBackend, list_gemini_models
 from agm_miner.rq1.llm import LLMAuthError, LLMRequestError
 from agm_miner.rq1.store import BatchState, ResponseCache
 from tests.test_rq1_backends import SCHEMA, Clock, prompt

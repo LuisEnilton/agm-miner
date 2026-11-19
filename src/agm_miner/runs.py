@@ -4,6 +4,7 @@ configuration snapshot and the exact code version, which makes the dataset repro
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import subprocess
 import threading
@@ -35,7 +36,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @lru_cache
 def code_version() -> str:
-    """Git commit of this checkout (``-dirty`` when there are uncommitted changes)."""
+    """Git commit of this checkout (``-dirty`` when there are uncommitted changes).
+
+    ``AGM_CODE_VERSION`` wins when set: the Docker image has no ``.git`` and receives the commit
+    it was built from (``docker compose build`` passes it as a build argument).
+    """
+    override = os.environ.get("AGM_CODE_VERSION", "").strip()
+    if override and override != "unknown":
+        return override
     try:
         sha = subprocess.run(
             ["git", "-C", str(_REPO_ROOT), "rev-parse", "HEAD"],

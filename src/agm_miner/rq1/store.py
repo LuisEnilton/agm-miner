@@ -130,6 +130,17 @@ class FailureLog:
         return {key: failures[key].get("last_error", "") for key in keys if key in failures}
 
 
+class ReadOnlyFailureLog(FailureLog):
+    """The failure log of an offline reproduction: read (given-up requests stay skipped), never
+    written."""
+
+    def record(self, key: str, error: str) -> None:
+        pass
+
+    def clear(self, key: str) -> None:
+        pass
+
+
 class BatchState:
     """Batches submitted and not yet collected. Every change is a locked read-modify-write, so
     two processes never drop each other's entries."""

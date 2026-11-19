@@ -406,3 +406,108 @@ def test_compare_and_model_options_on_the_command_line(tmp_path: Path, monkeypat
     assert bad.exit_code == 2 and "provider:model" in bad.output
     none = runner.invoke(app, [*args, "--model", "gemini:a", "--model", "gemini:b"])
     assert none.exit_code == 1 and "classify --model" in none.output
+
+
+class ClaudeLikeBackend(FakeBackend):
+    """Answers like FakeBackend, under the provider and model of the final collection."""
+
+    provider, model = "anthropic", "claude-sonnet-5-5"
+
+
+def test_classify_reproduces_from_the_cache_without_an_api_key(tmp_path: Path, monkeypatch) -> None:
+    """A replication runs `agm rq1 classify` on the published cache: no key, no request."""
+    from typer.testing import CliRunner
+
+    from agm_miner.cli import app
+    from agm_miner.config import load_study_config
+    from agm_miner.rq1 import llm
+
+    study_file = tmp_path / "study.yaml"
+    study_file.write_text(
+        "rq1:\n  provider: anthropic\n  classify_model: claude-sonnet-5-5\n  chunk_sections: 10\n"
+    )
+    config = load_study_config(study_file).rq1
+    gold, output, _ = setup(tmp_path)
+    codebook = codebook_file(tmp_path)
+    first = classify_sections(gold, output, config, ClaudeLikeBackend(), codebook_path=codebook)
+    labels = Path(first["output"]) / "section_labels.parquet"
+    expected = pl.read_parquet(labels)
+    labels.unlink()
+
+    class NoNetwork:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __getattr__(self, name):
+            raise AssertionError(f"the Anthropic API was used ({name})")
+
+    monkeypatch.setattr(llm.anthropic, "Anthropic", NoNetwork)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    args = ["rq1", "classify", "--gold", str(gold), "--codebook", str(codebook)]
+    result = CliRunner().invoke(app, [*args, "--study", str(study_file)])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.output[result.output.index("{") :])
+    assert summary["coverage"] == 1.0 and summary["output"] == first["output"]
+    assert pl.read_parquet(labels).equals(expected)
+
+
+class RefusingOnceBackend(ClaudeLikeBackend):
+    """The final run had refused requests: the first classification request is refused."""
+
+    def answer(self, request):
+        if request.schema_name == "classification" and not self.asked:
+            self.asked.append(request.custom_id)
+            return type(super().answer(request))(request.custom_id, "refused")
+        return super().answer(request)
+
+
+def test_offline_classify_reproduces_a_run_with_failed_requests(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A request that failed is not cached: without --offline it would be sent again (and need a
+    key); with --offline it stays unanswered and nothing published changes."""
+    from typer.testing import CliRunner
+
+    from agm_miner.cli import app
+    from agm_miner.config import load_study_config
+    from agm_miner.rq1 import llm
+
+    study_file = tmp_path / "study.yaml"
+    study_file.write_text(
+        "rq1:\n  provider: anthropic\n  classify_model: claude-sonnet-5-5\n  chunk_sections: 10\n"
+    )
+    config = load_study_config(study_file).rq1
+    gold, output, _ = setup(tmp_path)
+    codebook = codebook_file(tmp_path)
+    first = classify_sections(gold, output, config, RefusingOnceBackend(), codebook_path=codebook)
+    assert first["coverage"] < 1.0 and len(first["failed"]) == 1
+    labels = Path(first["output"]) / "section_labels.parquet"
+    expected = pl.read_parquet(labels)
+    failures = (output / "failures.json").read_text()
+    cached = sorted((output / "cache").rglob("*.json"))
+
+    class NoNetwork:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __getattr__(self, name):
+            raise AssertionError(f"the Anthropic API was used ({name})")
+
+    monkeypatch.setattr(llm.anthropic, "Anthropic", NoNetwork)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    args = ["rq1", "classify", "--gold", str(gold), "--codebook", str(codebook)]
+    args += ["--study", str(study_file)]
+    runner = CliRunner()
+    online = runner.invoke(app, args)
+    assert online.exit_code != 0  # it tried to send the failed request again
+
+    labels.unlink()
+    result = runner.invoke(app, [*args, "--offline"])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.output[result.output.index("{") :])
+    assert summary["offline"] is True and summary["coverage"] == first["coverage"]
+    assert pl.read_parquet(labels).equals(expected)
+    assert (output / "failures.json").read_text() == failures
+    assert sorted((output / "cache").rglob("*.json")) == cached

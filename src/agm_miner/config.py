@@ -23,6 +23,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class MissingDatabaseUrlError(RuntimeError):
+    """A command that needs PostgreSQL ran without DATABASE_URL."""
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -33,7 +37,9 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     openrouter_api_key: SecretStr | None = Field(default=None, alias="OPENROUTER_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, alias="GEMINI_API_KEY")
-    database_url: str = Field(alias="DATABASE_URL")
+    # Only the commands that use PostgreSQL need it (collection, export, status, runs); the
+    # analysis commands run from the exported files alone (require_database_url).
+    database_url: str | None = Field(default=None, alias="DATABASE_URL")
 
     data_dir: Path = Field(default=Path("data"), alias="DATA_DIR")
     clone_dir: Path = Field(default=Path("data/clones"), alias="CLONE_DIR")
@@ -53,6 +59,14 @@ class Settings(BaseSettings):
     progress_mode: Literal["auto", "live", "plain", "off"] = Field(
         default="auto", alias="AGM_PROGRESS"
     )
+
+    def require_database_url(self) -> str:
+        if not self.database_url:
+            raise MissingDatabaseUrlError(
+                "DATABASE_URL is not set (.env or environment): this command uses the PostgreSQL "
+                "database; the analysis commands (analyze, audit, rq1, rq2, figures) do not"
+            )
+        return self.database_url
 
     @property
     def bronze_dir(self) -> Path:

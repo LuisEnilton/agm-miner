@@ -75,7 +75,14 @@ from agm_miner.rq1.prompts import (
     with_alignment,
 )
 from agm_miner.rq1.sampling import stratified_sample
-from agm_miner.rq1.store import BatchState, FailureLog, ResponseCache, request_key, run_lock
+from agm_miner.rq1.store import (
+    BatchState,
+    FailureLog,
+    ReadOnlyFailureLog,
+    ResponseCache,
+    request_key,
+    run_lock,
+)
 from agm_miner.rq1.units import load_file_contents, load_units
 from agm_miner.runs import code_version
 
@@ -201,7 +208,7 @@ def _settle(
     key: str,
     result: LLMResult | None,
     validate: Callable[[LLMResult], T],
-    cache: ResponseCache,
+    cache: ResponseCache | None,
     failures: FailureLog,
 ) -> T | None:
     """Validated answer of one request, or None after recording why it failed."""
@@ -212,7 +219,8 @@ def _settle(
     try:
         answer = validate(result)
     except InvalidAnswer as exc:
-        cache.delete(key)  # ask again next run instead of reusing an answer in the wrong format
+        if cache is not None:  # ask again next run instead of reusing an answer in the wrong format
+            cache.delete(key)
         failures.record(key, f"invalid answer: {exc}")
         return None
     failures.clear(key)
@@ -229,7 +237,8 @@ def _run_requests(
 ) -> tuple[dict[str, T], dict[str, Any]]:
     """Run ``prompts`` (cached, resumable), validate every answer and report failures."""
     cache = ResponseCache(output_dir / "cache")
-    failures = FailureLog(output_dir / "failures.json")
+    offline = getattr(backend, "offline", False)  # OfflineBackend: reproduce, change nothing
+    failures = (ReadOnlyFailureLog if offline else FailureLog)(output_dir / "failures.json")
     keys = [prompt.custom_id for prompt in prompts]
     given_up = set(failures.given_up(keys, config.max_attempts))
     to_run = [prompt for prompt in prompts if prompt.custom_id not in given_up]
@@ -241,7 +250,7 @@ def _run_requests(
             prompt.custom_id,
             results.get(prompt.custom_id),
             lambda result, prompt=prompt: validate(prompt, result),
-            cache,
+            None if offline else cache,  # offline: keep the published cache untouched
             failures,
         )
         if answer is not None:
@@ -255,6 +264,8 @@ def _run_requests(
         "usage": usage_totals(results.values()),
         "served_by": dict(Counter(r.served_by for r in results.values() if r.served_by)),
     }
+    if offline:
+        report["offline"] = True
     return answers, report
 
 

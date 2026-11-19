@@ -30,7 +30,7 @@ poetry run agm export               # 4. banco → data/bronze/<timestamp>/*.par
 poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silver + gold por RQ)
 poetry run agm audit                # bronze → data/audit/<export>/: vieses (json, md e LaTeX)
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
-poetry run agm help [comando...]    # lista todos os comandos e o que fazem
+poetry run agm help [comando...]    # lista todos os comandos por painel e o que fazem
 poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
 poetry run agm runs cleanup         # RUNNING sem heartbeat há > --minutes vira INTERRUPTED
@@ -54,7 +54,9 @@ se o HEAD mudou), `--force` e `--keep-clones`.
 
 ```
 src/agm_miner/
-  cli.py              # comandos Typer; erros esperados viram mensagem de uma linha
+  cli/                # comandos Typer: common (apps, painéis, helpers), pipeline, results,
+                      # rq1, ops; erros esperados viram mensagem de uma linha. Todo comando
+                      # novo declara rich_help_panel (teste em test_cli_help.py)
   config.py           # Settings (.env: infra/segredos) + StudyConfig (study.yaml: metodologia)
   artifacts.py        # FONTE ÚNICA das regras de artefato (classify_path, GIT_PATHSPECS)
   file_categories.py  # categoria de qualquer arquivo (code, test, docs, ci, agent_artifact, ...)
@@ -193,11 +195,13 @@ falha se a migração divergir dos modelos.
   - `anthropic` (coleta final): o Claude **só** pelo SDK oficial, via `rq1.llm.LLMClient`; trabalho
     em massa pela Batches API (`execution.execute_batched`), que responde do cache, termina lotes
     de uma execução interrompida (`BatchState`) e só envia o que falta;
-  - `gemini` (testes com o nível gratuito, configuração atual) e `openrouter` (alternativa): um
+  - `gemini` (testes com o nível gratuito, usado no piloto) e `openrouter` (alternativa): um
     pedido por vez (`execute_one_by_one`), no ritmo de `rq1.*_requests_per_minute`, cada resposta
     no cache assim que chega; o limite diário levanta `DailyLimitError` sem perder nada. O Gemini
-    usa o SDK oficial `google-genai` (cota diária: `quotaId` com `PerDay`; por minuto: espera o
-    `retryDelay`), o OpenRouter usa HTTP com `requests`.
+    fica em `rq1/gemini.py` e usa o SDK oficial `google-genai`, que é o extra opcional `gemini`
+    (`poetry install -E gemini`; nada fora desse módulo o importa, e `make_backend` só o carrega
+    com `provider: gemini`). Cota diária: `quotaId` com `PerDay`; por minuto: espera o
+    `retryDelay`. O OpenRouter usa HTTP com `requests`.
   - Os dois expõem as esperas por `observe_waits`. Testes usam `FakeSession`/SDK falso.
 - Todo comando que chama o LLM ou grava no diretório da RQ1 roda dentro de `store.run_lock(dir)`:
   um segundo comando no mesmo diretório falha com `Rq1BusyError` em vez de enviar os mesmos

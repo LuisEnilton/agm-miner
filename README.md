@@ -885,6 +885,13 @@ Os testes de integração usam o Postgres do `docker compose`. Eles criam e recr
 banco `agm_test` (configurável por `TEST_DATABASE_URL`) e mineram repositórios git sintéticos
 criados durante o teste. O CI (GitHub Actions) roda lint e testes em cada PR.
 
+Para trabalhar em duas branches ao mesmo tempo (por exemplo, duas sessões de agente), use um
+`git worktree` por branch, cada um com o seu `.env` e o seu `TEST_DATABASE_URL`. O teste lê essa
+variável do ambiente ou, se não estiver lá, do `.env` da própria pasta; com o mesmo banco, duas
+suítes rodando juntas apagam as tabelas uma da outra. Se o terminal tiver um ambiente virtual
+ativado (`VIRTUAL_ENV`), rode `env -u VIRTUAL_ENV poetry install` no worktree novo, senão o Poetry
+instala o pacote no ambiente da outra pasta.
+
 ## Limitações
 
 - A Code Search do GitHub indexa só o branch default e arquivos menores que 384 KB, e seus

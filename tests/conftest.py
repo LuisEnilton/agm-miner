@@ -6,11 +6,26 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from dotenv import dotenv_values  # comes with pydantic-settings
 
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+psycopg2://research_user:research_password@localhost:5432/agm_test",
+_DEFAULT_TEST_DATABASE_URL = (
+    "postgresql+psycopg2://research_user:research_password@localhost:5432/agm_test"
 )
+
+
+def resolve_test_database_url(environ: dict[str, str], env_file: Path) -> str:
+    """The environment's TEST_DATABASE_URL, else the one in this checkout's ``.env``, else
+    ``agm_test``. Reading ``.env`` lets every git worktree use its own test database, so two
+    checkouts running the suite at once do not truncate each other's tables."""
+    return (
+        environ.get("TEST_DATABASE_URL")
+        or (dotenv_values(env_file).get("TEST_DATABASE_URL") if env_file.exists() else None)
+        or _DEFAULT_TEST_DATABASE_URL
+    )
+
+
+_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+TEST_DATABASE_URL = resolve_test_database_url(dict(os.environ), _ENV_FILE)
 
 # Settings are read from the environment; point everything at test resources before any
 # agm_miner module is imported.

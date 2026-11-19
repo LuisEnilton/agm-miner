@@ -11,7 +11,9 @@ responder às questões de pesquisa do estudo:
 | RQ3 Evolução | Frequência, o que muda, gatilhos, quem muda | `rq3_changes`, `rq3_author_roles` |
 | Correlação | Atributos dos artefatos × métricas do repositório | `repo_features` |
 
-Não há frontend nem API HTTP: tudo é executado pelo CLI `agm`.
+Não há frontend nem API HTTP: tudo é executado pelo CLI `agm`. A documentação para quem usa a
+ferramenta fica em `docs/` (índice no [README](README.md)); este arquivo cobre o que é preciso
+para mudar o código. Ao mudar um comportamento, atualize o documento de `docs/` que o descreve.
 
 ## Setup e comandos
 
@@ -36,7 +38,7 @@ poetry run agm runs list | funnel   # execuções registradas / funil de seleç�
 poetry run agm runs cleanup         # RUNNING sem heartbeat há > --minutes vira INTERRUPTED
 poetry run agm rq1 sample           # RQ1: amostra para a criação de labels com LLM
 poetry run agm rq1 propose | consolidate   # RQ1: rótulos livres → rascunho do codebook
-poetry run agm rq1 classify | saturation   # RQ1: categorias de todas as seções / cobertura
+poetry run agm rq1 classify [--offline] | saturation   # RQ1: categorias (do cache) / cobertura
 poetry run agm rq1 validate export | llm | score   # RQ1: planilha cega, réplicas, kappa
 poetry run agm rq1 compare --model p:m --model p:m # RQ1: dois classificadores comparados
 poetry run agm rq2 summary [--compare DIR]  # RQ2: tabelas de estrutura (lado a lado com outro gold)
@@ -126,7 +128,7 @@ Princípios que precisam ser mantidos:
    de 6,5s na code search, quota lida dos headers, retry com limite para 403 de rate limit, 408,
    429, 5xx e erros de rede). O PyGithub roda com `retry=0` (`default_requester`): a política de
    retry dele faria o urllib3 levantar `RetryError` no primeiro 5xx. Não chame o PyGithub direto.
-8. **Todo estágio pode ser interrompido e retomado** (seção "Usando o CLI" do README):
+8. **Todo estágio pode ser interrompido e retomado** ([docs/pipeline.md](docs/pipeline.md)):
    - o estado fica só no Postgres, e cada unidade de trabalho (página/fatia, lote, repositório) é
      commitada inteira;
    - `track_run` registra `INTERRUPTED`, e o CLI instala os tratadores de SIGINT/SIGTERM
@@ -267,32 +269,8 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
 
 ## Limitações conhecidas (ameaças à validade)
 
-- A Code Search indexa só o branch default e arquivos menores que 384 KB, e não é determinística.
-  Há mais de 1000 `AGENTS.md` numa faixa de 20 bytes, então até fatias de 1 byte podem estourar o
-  limite. `unreachable_matches` nas estatísticas da execução mede quantos resultados ficaram
-  inacessíveis.
-- A REST devolve `node_id` legado (`MDEw...`) para repositórios antigos, e o GraphQL responde com o
-  id novo. `fetch_metadata` casa as respostas por posição e grava o id canônico.
-  `stars:` não funciona nela, por isso o filtro de estrelas fica no estágio `select`.
-- As heurísticas de "tutorial/lista" (`exclude_keywords`), de bots, de agentes e dos papéis de
-  autor precisam de validação manual numa amostra antes da coleta final.
-- `hours_since_previous_change` usa a data de autoria (rebases podem distorcer).
-- Flesch só é calculado para textos detectados como inglês, e sobre `readability_text`
-  (`analysis/markdown.py`): parágrafos e itens de lista, sem títulos, tabelas e código. Cada
-  bloco é tratado como uma frase e termina em `.!?` (o textstat só separa frases por esses três
-  sinais; `:;,` no fim viram ponto). Blocos de 1 ou 2 palavras (rótulos, links soltos) ficam de
-  fora, porque o textstat não os conta como frases mas contaria as palavras. Sem isso, um arquivo
-  só de bullets virava uma frase única (grau acima de 20). Ainda distorcem o índice os blocos
-  formados por caminhos ou URLs sem espaços (muitas sílabas por "palavra").
-- Itens de lista tight não contam como parágrafos, URLs soltas contam como links e o BOM UTF-8 é
-  ignorado antes do frontmatter.
-- A mineração leva semanas; com `analysis.truncate_at_reference_date` o `analyze` corta o
-  histórico no fim da `reference_date` (`analysis/history_cutoff.py`, aplicado às tabelas do
-  bronze logo depois de carregá-las). Não dá para cortar `identities.commits` nem
-  `contributor_activity` (agregados do clone inteiro), nem os metadados da seleção.
-- `reference_date` no `study.yaml` fica fixa durante a coleta. O corte `created_before` do estudo
-  (2026-08-01) é mais tardio que o dos artigos relacionados (2024-01-01, o padrão de `config.py`),
-  então a amostra inclui projetos criados já com agentes.
+Estão em [docs/limitacoes.md](docs/limitacoes.md). Uma limitação nova (ou uma que deixou de
+valer) entra lá, junto com a mudança de código que a causou.
 
 ## Como estender
 
@@ -301,6 +279,11 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
   migração (a constraint CHECK muda). Cubra com casos em `tests/test_artifacts.py`.
 - **Nova métrica**: implemente em `analysis/` e acrescente ao schema da tabela silver/gold
   correspondente. Não mexa no minerador.
+- **Coluna ou tabela nova (bronze, silver ou gold)**: descreva-a em
+  `src/agm_miner/replication/data_dictionary.yaml` (marcando *Dado pessoal* quando for o caso) e
+  regenere `docs/dados.md` (`python -m agm_miner.replication.data_dictionary > docs/dados.md`).
+  `test_end_to_end.py` e `test_data_dictionary.py` falham até isso ser feito.
+- **Comando novo**: declare `rich_help_panel` e acrescente-o a `docs/cli.md` (`test_docs.py`).
 - **Novo critério de amostragem**: se depende de metadados do GitHub, entra em
   `selection.evaluate` (motivo gravado no banco, funil via `agm runs funnel`); se depende do
   histórico minerado, entra em `build_repository_sample`/`build_artifact_sample` de

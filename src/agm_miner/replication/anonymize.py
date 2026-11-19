@@ -3,9 +3,11 @@
 Names, e-mails, GitHub logins and identity keys of people become stable pseudonyms: an HMAC of
 the original value with a secret salt (``PACKAGE_SALT``, never published), so the same person
 gets the same pseudonym in every table and the joins still work. Bots and coding agents (the
-``analysis`` patterns of ``study.yaml``) keep their names: they are not people, and the analysis
-recognises them by name, so ``agm analyze`` on the pseudonymised bronze export reproduces the
-pseudonymised gold tables, author roles included. E-mails inside commit messages get the same
+``analysis`` patterns of ``study.yaml``) keep the name or e-mail that identifies them (e.g.
+``dependabot[bot]``, ``noreply@anthropic.com``), so the pattern that matched them still matches
+and ``agm analyze`` on the pseudonymised bronze export reproduces the pseudonymised gold tables,
+author roles included; the other part is pseudonymised, since people sometimes commit under a
+bot's name or with an agent's e-mail. E-mails inside commit messages get the same
 pseudonym as in the e-mail columns.
 
 The ``progress`` snapshot of ``pipeline_runs`` is dropped: it names the collection machine.
@@ -90,11 +92,17 @@ class Pseudonymizer:
         """The GitHub login of a bot or agent: kept only when it is itself a bot's login."""
         return value if self.automated(value, "") else self.login(value)
 
+    def bot_name(self, value: str | None) -> str | None:
+        """The name of a bot or agent: kept only when it is itself a bot's or an agent's name
+        (someone who commits with an agent's e-mail is still a person with a name)."""
+        return value if self.automated(value, "") else self.name(value)
+
     def person(self, name: str | None, email: str | None) -> tuple[str | None, str | None]:
-        """A bot or agent keeps its name (the analysis recognises it by it); a person gets
-        pseudonyms. Patterns that hit the name still hit it with a pseudonymised e-mail."""
+        """A person gets pseudonyms. A bot or agent keeps the part that identifies it (name,
+        e-mail or both), so the pattern that matched it still matches and the analysis sees the
+        same bot or agent; the other part is pseudonymised like a person's."""
         if self.automated(name, email):
-            return name, self.address(email)
+            return self.bot_name(name), self.address(email)
         return self.name(name), self.email(email)
 
     def text(self, value: str | None) -> str | None:
@@ -159,7 +167,7 @@ def _author_roles(frame: pl.DataFrame, p: Pseudonymizer) -> pl.DataFrame:
     names, logins = [], []
     for name, login, role in zip(frame["name"], frame["github_login"], frame["role"], strict=True):
         automated = role in AUTOMATED_ROLES
-        names.append(name if automated else p.name(name))
+        names.append(p.bot_name(name) if automated else p.name(name))
         logins.append(p.bot_login(login) if automated else p.login(login))
     return frame.with_columns(
         pl.Series("name", names, dtype=frame.schema["name"]),

@@ -86,9 +86,9 @@ src/agm_miner/
                       # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)
                       # agentreadmes (dataset do Agent READMEs como saída do analyze, para
                       # validação externa contra os rótulos humanos do artigo)
-  replication/        # data_dictionary (yaml → docs/dados.md), anonymize (pseudônimos por HMAC;
-                      # bots e agentes mantêm o nome) e package (agm package: pacote para o
-                      # Zenodo, só a partir de arquivos, em .partial)
+  replication/        # data_dictionary (yaml → docs/dados.md), anonymize (pseudônimos por
+                      # HMAC; bots e agentes mantêm só o nome ou e-mail que os identifica) e
+                      # package (agm package: pacote para o Zenodo, só de arquivos, em .partial)
   database/           # models.py (schema), session.py (engine único por URL) e schema.py
                       # (todo comando do CLI recusa um banco fora da revisão head do Alembic)
 ```

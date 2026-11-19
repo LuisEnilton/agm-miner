@@ -61,9 +61,11 @@ os comandos leem diretamente. O `reproduzir.sh` faz isso, guarda os resultados p
 
 **Dados pessoais.** Nomes, e-mails, logins do GitHub e chaves de identidade de pessoas viram
 pseudônimos estáveis (HMAC-SHA256 com o `PACKAGE_SALT`): a mesma pessoa tem o mesmo pseudônimo em
-todas as tabelas, e as junções continuam valendo. Bots e agentes de código mantêm o nome, porque a
-análise os reconhece por ele. Por isso, `agm analyze` sobre o bronze do pacote reproduz exatamente o
-gold do pacote, com os papéis de autor (`test_package.py` verifica). Nas mensagens de commit, os
+todas as tabelas, e as junções continuam valendo. Bots e agentes de código mantêm o que os
+identifica (o nome, como `dependabot[bot]`, ou o e-mail, como `noreply@anthropic.com`); a outra
+parte é trocada, porque há pessoas que fazem commits com o nome de um bot ou o e-mail de um agente.
+Como o padrão que reconheceu cada bot continua valendo, `agm analyze` sobre o bronze do pacote
+reproduz exatamente o gold do pacote, com os papéis de autor (`test_package.py` verifica). Nas mensagens de commit, os
 pares "Nome &lt;e-mail&gt;" (trailers como `Signed-off-by`) e os e-mails soltos também são trocados;
 um nome escrito em outro ponto do texto não tem como ser reconhecido e fica. O conteúdo dos
 arquivos minerados é publicado como está: são arquivos públicos, sob licenças OSI.

@@ -34,9 +34,12 @@ def test_pseudonyms_are_stable_salted_and_typed() -> None:
         Pseudonymizer(b"short", AnalysisConfig())
 
 
-def test_bots_and_agents_keep_their_names() -> None:
+def test_bots_and_agents_keep_what_identifies_them() -> None:
     assert P.person(*BOT) == BOT
-    assert P.person(*CLAUDE) == CLAUDE
+    # Claude is recognised by its e-mail: the e-mail stays, the name is a person's name.
+    assert P.person(*CLAUDE) == (P.name("Claude"), CLAUDE[1])
+    assert P.person("Cedric van Putten", CLAUDE[1]) == (P.name("Cedric van Putten"), CLAUDE[1])
+    assert P.automated(*P.person(*CLAUDE))
     name, email = P.person(*ANA)
     assert name != ANA[0] and email != ANA[1]
     # A pseudonym never looks like a bot or an agent to the analysis.
@@ -91,11 +94,12 @@ def test_commits_identities_and_coauthors() -> None:
         P.email(ANA[1]),
         P.login("ana"),
     )
-    assert out.row(1) == identities.row(1)
+    assert out.row(1) == (2, CLAUDE[1], P.name("Claude"), CLAUDE[1], None)
 
     coauthors = pl.DataFrame({"name": [CLAUDE[0], ANA[0]], "email": [CLAUDE[1], ANA[1]]})
     out = anonymize_frame("commit_coauthors", coauthors, P)
-    assert out.row(0) == CLAUDE and out.row(1) == (P.name(ANA[0]), P.email(ANA[1]))
+    assert out.row(0) == (P.name("Claude"), CLAUDE[1])
+    assert out.row(1) == (P.name(ANA[0]), P.email(ANA[1]))
 
 
 def test_gold_tables_and_runs() -> None:

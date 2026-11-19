@@ -534,8 +534,10 @@ está em `docs/replicacao.md` da ferramenta.
 Nomes, e-mails, logins do GitHub e chaves de identidade de pessoas foram trocados por
 pseudônimos estáveis (HMAC-SHA256 com uma chave secreta, não publicada): a mesma pessoa tem o
 mesmo pseudônimo em todas as tabelas, então as junções continuam valendo, mas o valor original
-não pode ser recuperado. Bots e agentes de código mantêm o nome, porque a análise os reconhece
-por ele. E-mails dentro das mensagens de commit também foram trocados. O retrato de progresso das
+não pode ser recuperado. Bots e agentes de código mantêm o que os identifica (o nome, como
+`dependabot[bot]`, ou o e-mail, como `noreply@anthropic.com`), porque a análise os reconhece por
+isso; a outra parte é trocada como a de uma pessoa. Os pares "Nome <e-mail>" e os e-mails dentro
+das mensagens de commit também foram trocados. O retrato de progresso das
 execuções (`pipeline_runs.progress`), que identifica a máquina da coleta, foi removido. Colunas
 pseudonimizadas:
 

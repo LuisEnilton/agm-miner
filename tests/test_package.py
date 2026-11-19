@@ -227,8 +227,8 @@ def test_package_has_no_personal_data_and_rebuilds_the_same_analysis(
     for value in PEOPLE:
         assert value not in without_content, value
     assert "4242@collection-host" not in text
-    for kept in (BOT[0], CLAUDE[1], CLAUDE[0], "github-actions", "@ai-sdk/provider@3.0.14"):
-        assert kept in text  # bots and agents keep their names; package specs stay
+    for kept in (BOT[0], BOT[1], CLAUDE[1], "github-actions", "@ai-sdk/provider@3.0.14"):
+        assert kept in text  # what identifies a bot or an agent stays; package specs stay
     assert p.email(ANA[1]) in text and p.name(BIA[0]) in text
 
     # `agm analyze` on the pseudonymised bronze gives the pseudonymised gold, table by table.

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     openrouter_api_key: SecretStr | None = Field(default=None, alias="OPENROUTER_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, alias="GEMINI_API_KEY")
+    # Secret that pseudonymises the personal data of the replication package (agm package);
+    # keep it to rebuild the same pseudonyms, never publish it.
+    package_salt: SecretStr | None = Field(default=None, alias="PACKAGE_SALT")
     # Only the commands that use PostgreSQL need it (collection, export, status, runs); the
     # analysis commands run from the exported files alone (require_database_url).
     database_url: str | None = Field(default=None, alias="DATABASE_URL")

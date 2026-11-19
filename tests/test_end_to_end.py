@@ -308,3 +308,18 @@ def test_interrupted_analysis_keeps_previous_output(
         build_datasets(bronze, output, AnalysisConfig())
     assert sorted(path.name for path in output.iterdir()) == before
     assert not (tmp_path / "gold.partial").exists()
+
+
+def test_every_exported_and_analysed_column_is_in_the_data_dictionary(
+    bronze: Path, tmp_path: Path
+) -> None:
+    from agm_miner.replication.data_dictionary import load_dictionary, undocumented_columns
+
+    output = tmp_path / "gold"
+    build_datasets(bronze, output, EVERYTHING)
+    files = sorted(bronze.glob("*.parquet")) + sorted(output.glob("*.parquet"))
+    tables = {path.stem for path in files}
+    assert tables == {table.name for table in load_dictionary().tables}
+    for path in files:
+        missing, extra = undocumented_columns(path.stem, pl.read_parquet_schema(path))
+        assert (missing, extra) == ([], []), path.stem

@@ -78,6 +78,7 @@ segredos ficam aqui; as decisões metodológicas ficam no [study.yaml](../study.
 | `DATABASE_URL` | Postgres; só os comandos que usam o banco exigem | — |
 | `ANTHROPIC_API_KEY` | RQ1 com o Claude (ou `ant auth login`) | — |
 | `GEMINI_API_KEY`, `OPENROUTER_API_KEY` | Provedores do piloto | — |
+| `PACKAGE_SALT` | Chave secreta que pseudonimiza os dados pessoais do pacote de replicação (`agm package`); guarde-a e nunca a publique | — |
 | `DATA_DIR` | Exports, análises e resultados | `data` |
 | `CLONE_DIR` | Clones temporários da mineração | `data/clones` |
 | `STUDY_CONFIG_PATH` | Configuração do estudo | `study.yaml` |

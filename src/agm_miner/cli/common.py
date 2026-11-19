@@ -98,6 +98,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         from agm_miner.database.schema import SchemaMismatchError
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
+        from agm_miner.replication.package import PackageInputError
         from agm_miner.rq1.agentreadmes import AgentReadmesError, OutputExistsError
         from agm_miner.rq1.llm import LLMAuthError, LLMRequestError
         from agm_miner.rq1.prompts import InvalidAnswer
@@ -127,6 +128,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             AuditOutputError,
             FiguresInputError,
             MissingDatabaseUrlError,
+            PackageInputError,
             SchemaMismatchError,
             StageBusyError,
             GitError,

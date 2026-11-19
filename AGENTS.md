@@ -43,6 +43,7 @@ poetry run agm rq1 validate export | llm | score   # RQ1: planilha cega, réplic
 poetry run agm rq1 compare --model p:m --model p:m # RQ1: dois classificadores comparados
 poetry run agm rq2 summary [--compare DIR]  # RQ2: tabelas de estrutura (lado a lado com outro gold)
 poetry run agm figures --model p:m --codebook F  # figuras do artigo (TikZ/pgfplots) em figuras.tex
+poetry run agm package                 # pacote de replicação (precisa de PACKAGE_SALT no .env)
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
 poetry run ruff check . && poetry run ruff format .
@@ -85,6 +86,9 @@ src/agm_miner/
                       # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)
                       # agentreadmes (dataset do Agent READMEs como saída do analyze, para
                       # validação externa contra os rótulos humanos do artigo)
+  replication/        # data_dictionary (yaml → docs/dados.md), anonymize (pseudônimos por
+                      # HMAC; bots e agentes mantêm só o nome ou e-mail que os identifica) e
+                      # package (agm package: pacote para o Zenodo, só de arquivos, em .partial)
   database/           # models.py (schema), session.py (engine único por URL) e schema.py
                       # (todo comando do CLI recusa um banco fora da revisão head do Alembic)
 ```

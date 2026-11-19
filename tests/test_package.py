@@ -32,7 +32,8 @@ ANA = ("Ana Dev", "ana@example.org")
 BIA = ("Bia Souza", "12345+biasouza@users.noreply.github.com")
 BOT = ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com")
 CLAUDE = ("Claude", "noreply@anthropic.com")
-PEOPLE = ("Ana Dev", "ana@example.org", "Bia Souza", "biasouza")
+CARLA = ("github-actions", "carla@example.net")  # a person under a bot's name
+PEOPLE = ("Ana Dev", "ana@example.org", "Bia Souza", "biasouza", "carla@example.net")
 
 V1 = "# Project\n\n## Setup\nInstall with make. Ask ana@example.org.\n"
 V2 = V1 + "\n## Testing\nRun pytest before pushing.\n"
@@ -53,6 +54,12 @@ def data_dir(tmp_path: Path, session_factory, repo_builder: RepoBuilder) -> Path
     repo.commit("Document testing", {"CLAUDE.md": V2}, author=BIA, date="2024-03-03T09:00:00Z")
     repo.commit("Bump", {"pyproject.toml": "[x]\n"}, author=BOT, date="2024-03-10T00:00:00Z")
     repo.commit("Refactor", {"src/app.py": "x = 2\n"}, author=CLAUDE, date="2024-03-20T00:00:00Z")
+    repo.commit(
+        "Release [@ai-sdk/provider@3.0.14]",
+        {"CLAUDE.md": V2 + "\n"},
+        author=CARLA,
+        date="2024-03-21T00:00:00Z",
+    )
     with session_factory() as session, session.begin():
         session.add(
             Repository(
@@ -220,8 +227,8 @@ def test_package_has_no_personal_data_and_rebuilds_the_same_analysis(
     for value in PEOPLE:
         assert value not in without_content, value
     assert "4242@collection-host" not in text
-    for kept in (BOT[0], CLAUDE[1], CLAUDE[0]):  # bots and agents keep their names
-        assert kept in text
+    for kept in (BOT[0], CLAUDE[1], CLAUDE[0], "github-actions", "@ai-sdk/provider@3.0.14"):
+        assert kept in text  # bots and agents keep their names; package specs stay
     assert p.email(ANA[1]) in text and p.name(BIA[0]) in text
 
     # `agm analyze` on the pseudonymised bronze gives the pseudonymised gold, table by table.
@@ -231,7 +238,7 @@ def test_package_has_no_personal_data_and_rebuilds_the_same_analysis(
         assert pl.read_parquet(rebuilt / path.name).equals(pl.read_parquet(path)), path.name
     roles = pl.read_parquet(gold / "rq3_author_roles.parquet")
     assert set(roles["role"]) >= {"agent", "bot"}
-    assert set(roles.filter(pl.col("role") == "bot")["name"]) == {BOT[0]}
+    assert set(roles.filter(pl.col("role") == "bot")["name"]) == {BOT[0], CARLA[0]}
 
 
 def test_package_command_needs_a_salt(tmp_path: Path, monkeypatch) -> None:

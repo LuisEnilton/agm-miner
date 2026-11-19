@@ -24,8 +24,13 @@ import polars as pl
 from agm_miner.analysis.authors import detect_agent, is_bot
 from agm_miner.config import AnalysisConfig
 
-# An address inside free text (commit messages): local part, @, domain with a dot.
-_EMAIL = r"[\w.%+\-\[\]]+@[\w\-]+(?:\.[\w\-]+)+"
+# An address inside free text (commit messages): local part, @, domain ending in an alphabetic
+# top-level domain, not glued to a path or a word. This leaves out package specs
+# (``@ai-sdk/provider@3.0.14``), SSH remotes (``git@github.com:org/repo``) and URL paths.
+_EMAIL = (
+    r"(?<![\w.%+\-/@])[\w.%+\-\[\]]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,24}"
+    r"(?![\w\-/:@])"
+)
 # "Name <address>" (trailers such as Signed-off-by, Co-authored-by) or a bare address, matched in
 # one pass so a pseudonym is never pseudonymised again.
 PERSON_IN_TEXT = re.compile(
@@ -76,9 +81,20 @@ class Pseudonymizer:
     def identity_key(self, value: str | None) -> str | None:
         return f"id-{self._digest('identity', value)}" if value else value
 
+    def address(self, value: str | None) -> str | None:
+        """The e-mail of a bot or agent: kept only when it is itself a bot's or an agent's address
+        (a person sometimes commits under a bot's name with their own e-mail)."""
+        return value if self.automated("", value) else self.email(value)
+
+    def bot_login(self, value: str | None) -> str | None:
+        """The GitHub login of a bot or agent: kept only when it is itself a bot's login."""
+        return value if self.automated(value, "") else self.login(value)
+
     def person(self, name: str | None, email: str | None) -> tuple[str | None, str | None]:
+        """A bot or agent keeps its name (the analysis recognises it by it); a person gets
+        pseudonyms. Patterns that hit the name still hit it with a pseudonymised e-mail."""
         if self.automated(name, email):
-            return name, email
+            return name, self.address(email)
         return self.name(name), self.email(email)
 
     def text(self, value: str | None) -> str | None:
@@ -89,10 +105,8 @@ class Pseudonymizer:
 
         def replace(match: re.Match[str]) -> str:
             if match.group("email"):
-                name, email = match.group("name"), match.group("email")
-                if self.automated(name, email):
-                    return match.group(0)
-                return f"{self.name(name)} <{self.email(email)}>"
+                name, email = self.person(match.group("name"), match.group("email"))
+                return f"{name} <{email}>"
             address = match.group("bare")
             return address if self.automated("", address) else self.email(address) or address
 
@@ -120,28 +134,37 @@ def _commits(frame: pl.DataFrame, p: Pseudonymizer) -> pl.DataFrame:
 
 
 def _identities(frame: pl.DataFrame, p: Pseudonymizer) -> pl.DataFrame:
-    keep = [p.automated(n, e) for n, e in zip(frame["name"], frame["email"], strict=True)]
-
-    def column(name: str, function: Callable[[str | None], str | None]) -> pl.Series:
-        values = [v if kept else function(v) for v, kept in zip(frame[name], keep, strict=True)]
-        return pl.Series(name, values, dtype=frame.schema[name])
-
+    """The identity key is the normalised e-mail: it is kept exactly when the e-mail is."""
+    names, emails, keys, logins = [], [], [], []
+    for name, email, key, login in zip(
+        frame["name"], frame["email"], frame["identity_key"], frame["github_login"], strict=True
+    ):
+        automated = p.automated(name, email)
+        new_name, new_email = p.person(name, email)
+        names.append(new_name)
+        emails.append(new_email)
+        keys.append(key if automated and new_email == email else p.identity_key(key))
+        logins.append(p.bot_login(login) if automated else p.login(login))
     return frame.with_columns(
-        column("identity_key", p.identity_key),
-        column("name", p.name),
-        column("email", p.email),
-        column("github_login", p.login),
+        pl.Series("name", names, dtype=frame.schema["name"]),
+        pl.Series("email", emails, dtype=frame.schema["email"]),
+        pl.Series("identity_key", keys, dtype=frame.schema["identity_key"]),
+        pl.Series("github_login", logins, dtype=frame.schema["github_login"]),
     )
 
 
 def _author_roles(frame: pl.DataFrame, p: Pseudonymizer) -> pl.DataFrame:
-    keep = [role in AUTOMATED_ROLES for role in frame["role"]]
-
-    def column(name: str, function: Callable[[str | None], str | None]) -> pl.Series:
-        values = [v if kept else function(v) for v, kept in zip(frame[name], keep, strict=True)]
-        return pl.Series(name, values, dtype=frame.schema[name])
-
-    return frame.with_columns(column("name", p.name), column("github_login", p.login))
+    """Same rules as ``identities``, with the role telling bots and agents apart (the analysis
+    gives them the roles ``bot`` and ``agent`` by the same patterns)."""
+    names, logins = [], []
+    for name, login, role in zip(frame["name"], frame["github_login"], frame["role"], strict=True):
+        automated = role in AUTOMATED_ROLES
+        names.append(name if automated else p.name(name))
+        logins.append(p.bot_login(login) if automated else p.login(login))
+    return frame.with_columns(
+        pl.Series("name", names, dtype=frame.schema["name"]),
+        pl.Series("github_login", logins, dtype=frame.schema["github_login"]),
+    )
 
 
 def _changes(frame: pl.DataFrame, p: Pseudonymizer) -> pl.DataFrame:

@@ -127,3 +127,53 @@ def test_tables_without_personal_data_are_untouched() -> None:
         "rq3_author_roles",
         "rq3_changes",
     }
+
+
+def test_a_person_under_a_bots_name_keeps_the_name_but_not_the_email() -> None:
+    # Found in the final collection: `github-actions <someone@gmail.com>`.
+    name, email = P.person("github-actions", "carla@example.net")
+    assert name == "github-actions" and email == P.email("carla@example.net")
+    assert P.automated(name, email)  # the analysis still sees a bot
+    assert P.person(*BOT) == BOT  # a bot's own address stays
+
+    identities = pl.DataFrame(
+        {
+            "identity_key": ["carla@example.net", BOT[1].lower()],
+            "name": ["github-actions", BOT[0]],
+            "email": ["carla@example.net", BOT[1]],
+            "github_login": ["carla", "dependabot[bot]"],
+        }
+    )
+    out = anonymize_frame("identities", identities, P)
+    assert out.row(0) == (
+        P.identity_key("carla@example.net"),
+        "github-actions",
+        P.email("carla@example.net"),
+        P.login("carla"),
+    )
+    assert out.row(1) == identities.row(1)
+    roles = pl.DataFrame({"name": ["github-actions"], "github_login": ["carla"], "role": ["bot"]})
+    assert anonymize_frame("rq3_author_roles", roles, P).row(0) == (
+        "github-actions",
+        P.login("carla"),
+        "bot",
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Bump [@ai-sdk/provider@3.0.14](https://github.com/vercel/ai/blob/@ai-sdk/provider@3.0.14/x)",
+        "git remote add origin git@github.com:acme/app.git",
+        "see https://example.com/users/ana@example.org/profile",
+        "npm i @types/ws@8.5.10",
+    ],
+)
+def test_things_that_are_not_email_addresses_stay(text: str) -> None:
+    assert P.text(text) == text
+
+
+def test_an_address_at_the_end_of_a_sentence_is_replaced() -> None:
+    assert P.text("Ask ana@example.org.") == f"Ask {P.email('ana@example.org')}."
+    trailer = "Co-authored-by: github-actions <carla@example.net>"
+    assert P.text(trailer) == f"Co-authored-by: github-actions <{P.email('carla@example.net')}>"

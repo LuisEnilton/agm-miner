@@ -110,6 +110,46 @@ class AnthropicBackend:
         return execute_batched(self.client, translated, cache, state, progress)
 
 
+# --------------------------------------------------------------------------- offline
+
+
+class OfflineBackend:
+    """Answers from the cache only, under the provider and model of the run being reproduced:
+    no credential and no request. Requests that are not cached (they failed or were never sent)
+    come back unanswered, as in the original run. The stages record no failure for them
+    (``offline``), so a replication leaves the published cache and failure log as they were."""
+
+    offline = True
+
+    def __init__(self, provider: str, model: str) -> None:
+        self.provider = provider
+        self.model = model
+
+    def observe_waits(self, observer: WaitObserver) -> None:
+        pass
+
+    def complete(self, request: PromptRequest) -> LLMResult:
+        raise LLMRequestError("offline: only cached answers are available")
+
+    def execute(
+        self,
+        prompts: Sequence[PromptRequest],
+        cache: ResponseCache,
+        state: BatchState,
+        progress: Progress | None = None,
+    ) -> dict[str, LLMResult]:
+        progress = progress or Progress()
+        results = {}
+        for prompt in prompts:
+            cached = cache.get(prompt.custom_id)
+            if cached is not None:
+                results[prompt.custom_id] = cached
+        progress.set_total("requests", len(prompts))
+        progress.advance("requests", len(results))
+        progress.set_done("cached", len(results))
+        return results
+
+
 # --------------------------------------------------------------------------- one by one
 
 

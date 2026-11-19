@@ -188,15 +188,20 @@ def _rq1_backend_run(
     gold: Path | None,
     run,
     model: str | None = None,
+    offline: bool = False,
 ):
-    """Shared plumbing of the LLM commands: backend of ``phase``, live progress, JSON result."""
+    """Shared plumbing of the LLM commands: backend of ``phase`` (or, ``offline``, the cache of
+    its provider and model), live progress, JSON result."""
     from agm_miner.progress import Progress, publishing
-    from agm_miner.rq1.backends import make_backend
+    from agm_miner.rq1.backends import OfflineBackend, make_backend
 
     settings, study = _context(study_path)
     study = _with_model(study, model)
     gold_dir, output_dir = _rq1_dirs(settings, gold)
-    backend = make_backend(settings, study.rq1, phase)
+    if offline:
+        backend = OfflineBackend(study.rq1.provider, study.rq1.model_for(phase)[0])
+    else:
+        backend = make_backend(settings, study.rq1, phase)
     with publishing(Progress(stage)) as progress, _showing_progress():
         result = run(gold_dir, output_dir, study, backend, progress)
     _print(result)
@@ -228,11 +233,18 @@ def rq1_classify(
     ] = None,
     unit: UnitOption = "section",
     model: ModelOption = None,
+    offline: Annotated[
+        bool,
+        typer.Option(
+            help="Answer from the cache only (no API key, no request), leaving the cache and the "
+            "failure log as they were: reproduces a published classification."
+        ),
+    ] = False,
     study_path: StudyOption = None,
 ) -> None:
     """Categories of every section with text (rq1.classify_model), file by file; with --unit
     file, of every whole file, one request per file. Cached and resumable: run it again after an
-    interruption or a daily limit."""
+    interruption or a daily limit; --offline reproduces a finished run from its cache."""
     from agm_miner.rq1.agentreadmes import labelled_artifact_ids
     from agm_miner.rq1.stages import classify_files, classify_sections
 
@@ -254,6 +266,7 @@ def rq1_classify(
             progress=progress,
         ),
         model,
+        offline,
     )
 
 

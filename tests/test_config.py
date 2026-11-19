@@ -78,3 +78,23 @@ def test_test_database_url_comes_from_the_environment_then_the_env_file(tmp_path
     assert resolve_test_database_url({}, env_file) == "postgresql://x/rq2"
     environ = {"TEST_DATABASE_URL": "postgresql://x/ci"}
     assert resolve_test_database_url(environ, env_file) == "postgresql://x/ci"
+
+
+def test_database_url_is_only_required_by_the_commands_that_use_it(tmp_path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from agm_miner.cli import app
+    from agm_miner.config import MissingDatabaseUrlError, Settings, get_settings
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.database_url is None
+    with pytest.raises(MissingDatabaseUrlError, match="analysis commands"):
+        settings.require_database_url()
+    assert Settings(_env_file=None, DATABASE_URL="postgresql://x/y").require_database_url()
+
+    monkeypatch.chdir(tmp_path)  # no .env here
+    get_settings.cache_clear()
+    result = CliRunner().invoke(app, ["runs", "list"])
+    assert result.exit_code == 1 and "DATABASE_URL is not set" in result.output
+    get_settings.cache_clear()

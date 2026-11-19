@@ -20,7 +20,7 @@ def _database_url() -> str:
     configured = config.get_main_option("sqlalchemy.url")
     if configured and not configured.startswith("driver://"):
         return configured
-    return get_settings().database_url
+    return get_settings().require_database_url()
 
 
 def run_migrations_offline() -> None:

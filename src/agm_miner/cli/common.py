@@ -94,6 +94,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         from agm_miner.analysis.paper_figures import FiguresInputError
         from agm_miner.analysis.sampling_audit import AuditOutputError
+        from agm_miner.config import MissingDatabaseUrlError
         from agm_miner.database.schema import SchemaMismatchError
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
@@ -125,6 +126,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         except (
             AuditOutputError,
             FiguresInputError,
+            MissingDatabaseUrlError,
             SchemaMismatchError,
             StageBusyError,
             GitError,
@@ -155,7 +157,7 @@ def _database(settings: Settings) -> sessionmaker[Session]:
     """Session factory for DATABASE_URL, refusing a database at another schema revision."""
     from agm_miner.database.schema import ensure_current_schema
 
-    factory = get_session_factory(settings.database_url)
+    factory = get_session_factory(settings.require_database_url())
     ensure_current_schema(factory.kw["bind"])
     return factory
 

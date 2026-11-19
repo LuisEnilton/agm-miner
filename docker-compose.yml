@@ -16,5 +16,27 @@ services:
       timeout: 5s
       retries: 5
 
+  # The CLI in a container: `docker compose run --rm agm <command>` (no local Python needed).
+  # Build: AGM_CODE_VERSION=$(git rev-parse HEAD) docker compose build agm
+  # Commands that use the database need `docker compose up -d db` first; the analysis commands
+  # (analyze, audit, rq1 classify from the cache, rq2 summary, figures) do not.
+  agm:
+    profiles: ["tool"]  # never started by `docker compose up`
+    build:
+      context: .
+      args:
+        CODE_VERSION: ${AGM_CODE_VERSION:-unknown}
+    image: agm-miner:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg2://research_user:research_password@db:5432/agent_artifacts_research
+      DATA_DIR: /data
+      CLONE_DIR: /data/clones
+    user: "${AGM_UID:-1000}:${AGM_GID:-1000}"  # files written to ./data stay yours
+    volumes:
+      - ./data:/data
+
 volumes:
   pgdata:

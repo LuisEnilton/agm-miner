@@ -39,6 +39,7 @@ Convenções de todos os comandos:
 | `agm rq1 agentreadmes import` | Importa o dataset do *Agent READMEs* no formato da saída do `analyze` | [rq1.md](rq1.md#validação-externa-com-o-dataset-do-agent-readmes) |
 | `agm rq1 agentreadmes score` | Concordância com os rótulos humanos do *Agent READMEs*, com o GPT-5 como linha de base | [rq1.md](rq1.md#validação-externa-com-o-dataset-do-agent-readmes) |
 | `agm rq2 summary` | Tabelas de estrutura da RQ2, opcionalmente ao lado de outro dataset | [rq2.md](rq2.md) |
+| `agm package` | Pacote de replicação de um export para o Zenodo (dados pseudonimizados, resultados, configuração) | [replicacao.md](replicacao.md#o-pacote-de-replicação) |
 
 ## Operação
 

@@ -32,6 +32,46 @@ DATA_DIR/
 
 A descrição de cada tabela e coluna está em [dados.md](dados.md).
 
+## O pacote de replicação
+
+`agm package` reúne num pacote para o Zenodo tudo o que um export precisa para ser reproduzido,
+lendo só arquivos (sem banco):
+
+```bash
+# PACKAGE_SALT no .env: chave secreta de 16 caracteres ou mais (guarde-a; nunca a publique)
+poetry run agm package          # o export mais recente; --bronze DIR escolhe outro
+```
+
+A saída fica em `DATA_DIR/package/<export>/` (gravada em `.partial` e renomeada no fim):
+
+| Arquivo | Conteúdo |
+|---|---|
+| `dados/bronze-<export>.zip`, `dados/gold-<export>.zip` | O export e a análise, com os dados pessoais pseudonimizados |
+| `rq1/rq1-<export>.zip`, `rq1/rq1-agentreadmes.zip` | Cache das respostas do LLM, rótulos e manifestos da RQ1 (sem lotes pendentes nem locks) |
+| `resultados/` | Auditoria, RQ2 e figuras, em zip e os arquivos principais soltos |
+| `config/` | O `study.yaml`, os codebooks e as fontes fixadas do *Agent READMEs* (URL e SHA-256) |
+| `README.md`, `manifest.json` | Proveniência (export, versões do código, amostra) e como reproduzir |
+| `DICIONARIO_DE_DADOS.md` | O mesmo de [dados.md](dados.md) |
+| `licencas.csv`, `LICENSE-DATA.md` | Licença de cada repositório publicado; CC BY 4.0 para o resto |
+| `reproduzir.sh`, `SHA256SUMS` | O script dos níveis L1 e L2; o hash de cada arquivo |
+
+Cada zip reproduz a estrutura do `DATA_DIR`: extraídos na mesma pasta, formam um `DATA_DIR` que
+os comandos leem diretamente. O `reproduzir.sh` faz isso, guarda os resultados publicados em
+`data/publicado/` e os refaz com os comandos abaixo.
+
+**Dados pessoais.** Nomes, e-mails, logins do GitHub e chaves de identidade de pessoas viram
+pseudônimos estáveis (HMAC-SHA256 com o `PACKAGE_SALT`): a mesma pessoa tem o mesmo pseudônimo em
+todas as tabelas, e as junções continuam valendo. Bots e agentes de código mantêm o nome, porque a
+análise os reconhece por ele. Por isso, `agm analyze` sobre o bronze do pacote reproduz exatamente o
+gold do pacote, com os papéis de autor (`test_package.py` verifica). Nas mensagens de commit, os
+pares "Nome &lt;e-mail&gt;" (trailers como `Signed-off-by`) e os e-mails soltos também são trocados;
+um nome escrito em outro ponto do texto não tem como ser reconhecido e fica. O conteúdo dos
+arquivos minerados é publicado como está: são arquivos públicos, sob licenças OSI.
+
+**O que não entra.** Os arquivos do *Agent READMEs* (o dataset não declara licença): o
+`reproduzir.sh` os baixa das revisões fixadas e confere o SHA-256. O piloto (`data/pilot`) também
+fica de fora.
+
 ## L1: dos dados publicados aos resultados
 
 Com Poetry (`poetry run agm ...`) ou Docker (`docker compose run --rm agm ...`, com os dados em

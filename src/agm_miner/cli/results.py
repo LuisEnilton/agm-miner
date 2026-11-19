@@ -15,6 +15,7 @@ from agm_miner.cli.common import (
     _context,
     _handle_errors,
     _print,
+    _showing_progress,
     _with_model,
     app,
     rq2_app,
@@ -157,3 +158,50 @@ def figures(
             code_version=code_version(),
         )
     )
+
+
+@app.command("package", rich_help_panel=PANEL_RESULTS)
+@_handle_errors
+def package(
+    bronze: Annotated[
+        Path | None, typer.Option(help="Bronze export directory (default: the latest one).")
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option(help="Output folder (default: DATA_DIR/package/<export>)."),
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Replication package of an export for Zenodo: the bronze export and its analysis with the
+    personal data pseudonymised (PACKAGE_SALT), the RQ1 cache and outputs, the results, the
+    configuration, a data dictionary and reproduzir.sh (no database needed)."""
+    from agm_miner.progress import Progress, publishing
+    from agm_miner.replication.anonymize import Pseudonymizer
+    from agm_miner.replication.package import PackageInputError, PackageInputs, build_package
+    from agm_miner.runs import code_version
+    from agm_miner.stages.export import latest_export
+
+    settings, study = _context(study_path)
+    if settings.package_salt is None or len(settings.package_salt.get_secret_value()) < 16:
+        raise PackageInputError(
+            "PACKAGE_SALT is not set (.env): a secret of at least 16 characters that "
+            "pseudonymises the personal data; keep it to rebuild the same pseudonyms, and never "
+            "publish it"
+        )
+    bronze_dir = bronze or latest_export(settings.bronze_dir)
+    inputs = PackageInputs(
+        bronze_dir=bronze_dir,
+        gold_dir=settings.gold_dir / bronze_dir.name,
+        data_dir=settings.data_dir,
+        study_path=study_path or settings.study_config_path,
+        codebooks_dir=Path("codebooks"),
+        output_dir=output or settings.data_dir / "package" / bronze_dir.name,
+    )
+    pseudonymizer = Pseudonymizer(
+        settings.package_salt.get_secret_value().encode("utf-8"), study.analysis
+    )
+    with publishing(Progress("PACKAGE")) as progress, _showing_progress():
+        result = build_package(
+            inputs, pseudonymizer, code_version=code_version(), progress=progress
+        )
+    _print(result)

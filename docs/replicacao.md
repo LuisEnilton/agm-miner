@@ -6,7 +6,7 @@ Cada nível parte de um ponto diferente do pipeline:
 | Nível | Parte de | O que roda | Precisa de | Tempo |
 |---|---|---|---|---|
 | **L1** | saídas publicadas (bronze, gold, cache da RQ1) | RQ1 a partir do cache, RQ2, auditoria e figuras | Python ou Docker; sem rede, banco ou chave | minutos |
-| **L2** | export bronze | `agm analyze` e depois o L1 | cerca de 5 GB de RAM | cerca de 1 hora |
+| **L2** | export bronze | `agm analyze` e depois o L1 | 4 GB de RAM livres | cerca de 1h30 |
 | **L3** | GitHub | coleta inteira com a mesma versão da ferramenta | token do GitHub, Postgres, chave da Anthropic | semanas |
 
 L1 e L2 devem reproduzir os números do artigo exatamente. O L3 não: a Code Search não é
@@ -113,8 +113,9 @@ continuam sem resposta, em vez de serem enviados de novo.
 
 ## L2: do export bronze à análise
 
-O `analyze` lê só o export, sem banco. Ele usa alguns GB de memória; com um teto, um erro de
-memória derruba só o comando:
+O `analyze` lê só o export, sem banco. Na coleta final ele levou 1h31 e chegou a 3,3 GB de
+memória (numa máquina de 8 GB); com um teto, um erro de memória derruba só o comando. Feito assim,
+ele reproduziu as oito tabelas do gold publicado idênticas:
 
 ```bash
 export DATA_DIR=/tmp/agm-l2                    # pasta nova, para não misturar com o publicado

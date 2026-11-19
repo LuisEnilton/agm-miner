@@ -406,7 +406,7 @@ repositório e no registro dela no Zenodo.
 REPRODUCE_SCRIPT = r"""#!/usr/bin/env bash
 # Reproduz os resultados do artigo a partir deste pacote (ver README.md).
 #   ./reproduzir.sh L1   dos resultados publicados (minutos; sem banco e sem chave de API)
-#   ./reproduzir.sh L2   refaz antes o agm analyze a partir do export bronze (cerca de 5 GB de RAM)
+#   ./reproduzir.sh L2   refaz antes o agm analyze do export bronze (1h30; 4 GB de RAM livres)
 # Precisa do comando `agm` da versão citada no README (com o Poetry:
 # AGM="poetry -C /caminho/da/ferramenta run agm"),
 # de unzip, curl e sha256sum. As saídas vão para $DATA_DIR (padrão: ./data, ao lado do script).

@@ -84,6 +84,15 @@ OURS = labels(
     (6, "CLAUDE", "SKILL_MANIFEST", "testing"),
     (7, "CLAUDE", "SKILL_RESOURCE", "testing"),
 )
+# The Agent READMEs files: CLAUDE.md 2 is below the size limit, so the AR column leaves it out.
+AR_STRUCTURE = pl.DataFrame(
+    [
+        structure_row(1, 1, "CLAUDE.md"),
+        structure_row(2, 2, "CLAUDE.md", size_bytes=1000),
+        structure_row(3, 3, "AGENTS.md"),
+        structure_row(4, 4, ".github/copilot-instructions.md", tool="COPILOT"),
+    ]
+)
 # Section rows: a file has every category of its sections; COPILOT is not in the figure.
 AGENTREADMES = labels(
     (1, "CLAUDE", "INSTRUCTION", "testing"),
@@ -140,18 +149,24 @@ def test_root_files_skip_resources_small_files_and_symlinks() -> None:
 
 
 def test_prevalence_columns() -> None:
-    columns = prevalence_columns(OURS, STRUCTURE, AGENTREADMES, 2048)
+    columns = prevalence_columns(OURS, STRUCTURE, AGENTREADMES, 2048, AR_STRUCTURE)
     assert list(columns) == list(PREVALENCE_COLUMNS)
     assert columns[("CLAUDE.md", CUT_ALL)].files == 3
     root = columns[("CLAUDE.md", CUT_ROOT)]
     assert root.files == 1 and root.percent("testing") == 100 and root.percent("security") == 0
     assert columns[("AGENTS.md", CUT_ROOT)].percent("security") == 100
-    assert columns[("CLAUDE.md", CUT_AR)].percent("testing") == 50
+    # The AR column uses the same size filter as ours: CLAUDE.md 2 (1.000 bytes) is left out.
+    ar = columns[("CLAUDE.md", CUT_AR)]
+    assert ar.files == 1 and ar.percent("testing") == 100 and ar.percent("security") == 100
+    unfiltered = prevalence_columns(OURS, STRUCTURE, AGENTREADMES, 0, AR_STRUCTURE)
+    assert unfiltered[("CLAUDE.md", CUT_AR)].percent("testing") == 50
     assert columns[("AGENTS.md", CUT_AR)].files == 1
     # Testing (2/3) before architecture (1/3); security (0) last.
     assert category_order(columns, CATEGORIES) == ["testing", "architecture", "security"]
     with pytest.raises(ValueError, match="AGENTS.md files in the AR column"):
-        prevalence_columns(OURS, STRUCTURE, AGENTREADMES.filter(pl.col("tool") != "AGENTS"), 0)
+        prevalence_columns(
+            OURS, STRUCTURE, AGENTREADMES.filter(pl.col("tool") != "AGENTS"), 0, AR_STRUCTURE
+        )
 
 
 def test_element_counts_use_the_rq2_files() -> None:
@@ -185,7 +200,7 @@ def _tex() -> str:
         pipeline_numbers(AUDIT, STRUCTURE, 2048),
         (element_counts(STRUCTURE, 2048), element_counts(STRUCTURE, 2048)),
         2048,
-        prevalence_columns(OURS, STRUCTURE, AGENTREADMES, 2048),
+        prevalence_columns(OURS, STRUCTURE, AGENTREADMES, 2048, AR_STRUCTURE),
         CATEGORIES,
         NAMES | {"security": "Security & Privacy"},
         {"Analysis": "data/gold/x"},
@@ -234,7 +249,7 @@ def _write_inputs(data_dir: Path) -> tuple[Path, Path]:
     for directory in (gold, compare, audit):
         directory.mkdir(parents=True)
     STRUCTURE.write_parquet(gold / "rq2_structure.parquet")
-    STRUCTURE.write_parquet(compare / "rq2_structure.parquet")
+    AR_STRUCTURE.write_parquet(compare / "rq2_structure.parquet")
     manifest = {"code_version": "abc", "analysis_config": {"min_artifact_bytes": 2048}}
     (gold / "analysis_manifest.json").write_text(json.dumps(manifest))
     (audit / "audit.json").write_text(json.dumps(AUDIT))

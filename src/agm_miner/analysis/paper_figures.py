@@ -129,15 +129,18 @@ def prevalence_columns(
     structure: pl.DataFrame,
     agentreadmes: pl.DataFrame,
     min_bytes: int,
+    compared_structure: pl.DataFrame,
 ) -> dict[tuple[str, str], Counts]:
     """The columns of the QP1 heatmap (``PREVALENCE_COLUMNS``): our classified files (Todos),
     the root file of each repository among them (Raiz) and the Agent READMEs files (AR, CLAUDE.md
-    and AGENTS.md only)."""
+    and AGENTS.md only). The AR files go through the same size filter as ours (their
+    ``compared_structure``), since the share of most categories grows with the file size."""
     roots = root_artifact_ids(structure, min_bytes)
+    kept = prepare(compared_structure, min_bytes)["artifact_id"]
     cuts = {
         CUT_ALL: category_counts(ours),
         CUT_ROOT: category_counts(ours.filter(pl.col("artifact_id").is_in(roots.implode()))),
-        CUT_AR: category_counts(agentreadmes),
+        CUT_AR: category_counts(agentreadmes.filter(pl.col("artifact_id").is_in(kept.implode()))),
     }
     columns = {}
     for file_type, cut in PREVALENCE_COLUMNS:
@@ -363,6 +366,7 @@ def prevalence_figure(
     columns: Mapping[tuple[str, str], Counts],
     categories: Sequence[str],
     names: Mapping[str, str],
+    min_bytes: int,
 ) -> str:
     """Heatmap of the share of files with each category (rows) per file type and cut (columns),
     with the whole percentage in each cell (darker: more files)."""
@@ -409,7 +413,8 @@ def prevalence_figure(
         "\n".join(lines),
         "Porcentagem dos arquivos com cada categoria de conteúdo. \\emph{Todos}: arquivos com "
         "ao menos uma seção classificada; \\emph{Raiz}: o arquivo da raiz de cada repositório; "
-        "AR: arquivos rotulados do \\textit{Agent READMEs} (sem filtro de tamanho), "
+        f"AR: arquivos rotulados do \\textit{{Agent READMEs}} com pelo menos {number(min_bytes)} "
+        "bytes, "
         "classificados pelo mesmo modelo. Categorias "
         "ordenadas pela coluna \\emph{Todos} de \\texttt{CLAUDE.md}.",
         "fig:prevalencia",
@@ -434,7 +439,7 @@ def figures_tex(
     for name, body in (
         ("figPipeline", pipeline_figure(pipeline)),
         ("figElementos", elements_figure(*elements, min_bytes)),
-        ("figPrevalencia", prevalence_figure(prevalence, categories, names)),
+        ("figPrevalencia", prevalence_figure(prevalence, categories, names, min_bytes)),
     ):
         lines += [f"\\newcommand{{\\{name}}}{{%", body, "}", ""]
     return "\n".join(lines)
@@ -486,7 +491,7 @@ def write_figures(
 
     pipeline = pipeline_numbers(audit, structure, min_bytes)
     elements = (element_counts(structure, min_bytes), element_counts(compared, min_bytes))
-    prevalence = prevalence_columns(ours_labels, structure, ar_labels, min_bytes)
+    prevalence = prevalence_columns(ours_labels, structure, ar_labels, min_bytes, compared)
     sources = {
         "Analysis": f"{gold_dir} (code {manifest.get('code_version')})",
         "Audit": f"{audit_dir} (code {audit.get('code_version')})",

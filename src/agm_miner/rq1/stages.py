@@ -7,8 +7,11 @@ Layout of that directory::
     propose/<provider>/<model>/proposals.*        free labels per sampled section
     consolidate/<provider>/<model>/               codebook.draft.yaml, label_map.parquet
     classify/<codebook>/<provider>/<model>/       section, artifact and repository labels
+    classify-file/<codebook>/<provider>/<model>/  labels of whole files (one request per file)
     saturation/<codebook>/<provider>/<model>/     classification of a fresh sample
-    validation/<codebook>/                        blind sheet, LLM replicates, agreement scores
+    validation/<codebook>/                        blind sheet; llm/<provider>/<model>/ holds the
+                                                  model's replicates and agreement scores
+    compare/<codebook>/<A>__vs__<B>/              two classifiers compared (sample, every section)
     agentreadmes/<codebook>/<provider>/<model>/   file-level scores on the Agent READMEs dataset
     cache/, batches.json, failures.json           LLM answers, pending batches, failed requests
 """
@@ -20,7 +23,7 @@ import json
 import os
 import re
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -39,6 +42,8 @@ from agm_miner.rq1.prompts import (
     ALIGN_SCHEMA,
     ALIGN_SYSTEM,
     ALIGN_VERSION,
+    CLASSIFY_FILE_SCHEMA,
+    CLASSIFY_FILE_VERSION,
     CLASSIFY_SCHEMA,
     CLASSIFY_VERSION,
     INDUCE_SCHEMA,
@@ -51,15 +56,18 @@ from agm_miner.rq1.prompts import (
     PROPOSE_VERSION,
     InvalidAnswer,
     LabelGroup,
+    classify_file_system,
     classify_system,
     induce_system,
     normalise_label,
     parse_alignment,
     parse_classification,
+    parse_file_classification,
     parse_induction,
     parse_mapping,
     parse_proposals,
     render_alignment,
+    render_file,
     render_labels,
     render_mapping,
     render_sections,
@@ -68,7 +76,7 @@ from agm_miner.rq1.prompts import (
 )
 from agm_miner.rq1.sampling import stratified_sample
 from agm_miner.rq1.store import BatchState, FailureLog, ResponseCache, request_key, run_lock
-from agm_miner.rq1.units import load_units
+from agm_miner.rq1.units import load_file_contents, load_units
 from agm_miner.runs import code_version
 
 SAMPLE = "sample.parquet"
@@ -718,12 +726,24 @@ def classify_sections(
     *,
     codebook_path: Path,
     limit: int | None = None,
+    artifact_ids: Collection[int] | None = None,
+    kinds: Collection[str] | None = None,
     progress: Progress | None = None,
 ) -> dict[str, Any]:
-    """Categories of every section with text, sent file by file (``limit`` requests at most)."""
+    """Categories of every section with text, sent file by file (``limit`` requests at most;
+    only the files in ``artifact_ids`` and of the artifact ``kinds``, when given). Requests are
+    built per file, so a later run over more files reuses the answers already cached."""
     with run_lock(output_dir):
         return _classify_sections(
-            gold_dir, output_dir, config, backend, codebook_path, limit, progress or Progress()
+            gold_dir,
+            output_dir,
+            config,
+            backend,
+            codebook_path,
+            limit,
+            artifact_ids,
+            kinds,
+            progress or Progress(),
         )
 
 
@@ -734,10 +754,16 @@ def _classify_sections(
     backend: LLMBackend,
     codebook_path: Path,
     limit: int | None,
+    artifact_ids: Collection[int] | None,
+    kinds: Collection[str] | None,
     progress: Progress,
 ) -> dict[str, Any]:
     codebook = load_codebook(codebook_path)
     units = load_units(gold_dir)
+    if artifact_ids is not None:
+        units = units.filter(pl.col("artifact_id").is_in(list(artifact_ids)))
+    if kinds is not None:
+        units = units.filter(pl.col("kind").is_in(list(kinds)))
     distinct = distinct_units(units)
     chunks = file_chunks(distinct, config.chunk_sections)
     selected = chunks if limit is None else chunks[:limit]
@@ -768,6 +794,9 @@ def _classify_sections(
         },
         "sections": units.height,
         "distinct_sections": distinct.height,
+        "files": units["artifact_id"].n_unique(),
+        "only_files": None if artifact_ids is None else len(set(artifact_ids)),
+        "only_kinds": None if kinds is None else sorted(set(kinds)),
         "requests_planned": len(chunks),
         "limit": limit,
         "distinct_sections_labelled": labelled,
@@ -776,6 +805,154 @@ def _classify_sections(
         if labelled
         else None,
         "rows": {name: frame.height for name, frame in outputs.items()},
+        **report,
+    }
+    _write_manifest(destination / "classify.json", gold_dir, config, **summary)
+    return {"output": str(destination), **summary}
+
+
+FILE_LABELS = "file_labels.parquet"
+_FILE_LABELS_SCHEMA = {
+    "artifact_id": pl.Int64,
+    "repo_id": pl.Int64,
+    "full_name": pl.Utf8,
+    "path": pl.Utf8,
+    "tool": pl.Utf8,
+    "kind": pl.Utf8,
+    "categories": pl.List(pl.Utf8),
+}
+
+
+def file_labels_dir(output_dir: Path, codebook: Codebook, provider: str, model: str) -> Path:
+    return output_dir / "classify-file" / _codebook_slug(codebook) / provider / model_slug(model)
+
+
+def classify_files(
+    gold_dir: Path,
+    output_dir: Path,
+    config: Rq1Config,
+    backend: LLMBackend,
+    *,
+    codebook_path: Path,
+    limit: int | None = None,
+    artifact_ids: Collection[int] | None = None,
+    kinds: Collection[str] | None = None,
+    progress: Progress | None = None,
+) -> dict[str, Any]:
+    """Categories of every whole file, one request per file (the strategy of the Agent READMEs
+    paper), to measure what classifying by section changes. Needs ``file_contents.parquet``
+    in ``gold_dir``. A file without content gets no category and no request."""
+    with run_lock(output_dir):
+        return _classify_files(
+            gold_dir,
+            output_dir,
+            config,
+            backend,
+            codebook_path,
+            limit,
+            artifact_ids,
+            kinds,
+            progress or Progress(),
+        )
+
+
+def _classify_files(
+    gold_dir: Path,
+    output_dir: Path,
+    config: Rq1Config,
+    backend: LLMBackend,
+    codebook_path: Path,
+    limit: int | None,
+    artifact_ids: Collection[int] | None,
+    kinds: Collection[str] | None,
+    progress: Progress,
+) -> dict[str, Any]:
+    codebook = load_codebook(codebook_path)
+    files = load_file_contents(gold_dir)
+    if artifact_ids is not None:
+        files = files.filter(pl.col("artifact_id").is_in(list(artifact_ids)))
+    if kinds is not None:
+        files = files.filter(pl.col("kind").is_in(list(kinds)))
+    rows = files.to_dicts()
+    with_content = [row for row in rows if row["content"].strip()]
+    selected = with_content if limit is None else with_content[:limit]
+    progress.set_phase(f"classifying {len(selected)} whole files with {backend.model}")
+
+    system = classify_file_system(codebook)
+    key_of: dict[int, str] = {}
+    prompts: dict[str, PromptRequest] = {}
+    for row in selected:
+        content_hash = hashlib.sha256(row["content"].encode("utf-8")).hexdigest()
+        key = request_key(
+            "classify-file",
+            CLASSIFY_FILE_VERSION,
+            backend.provider,
+            backend.model,
+            codebook.fingerprint(),
+            "",
+            content_hash,
+        )
+        key_of[row["artifact_id"]] = key
+        # Identical files are classified once.
+        prompts.setdefault(
+            key,
+            PromptRequest(
+                key,
+                system,
+                render_file(row),
+                CLASSIFY_FILE_SCHEMA,
+                config.classify_max_tokens,
+                "file_classification",
+            ),
+        )
+    answers, report = _run_requests(
+        backend,
+        list(prompts.values()),
+        output_dir,
+        config,
+        progress,
+        lambda _prompt, result: parse_file_classification(result.text, codebook),
+    )
+
+    labelled = []
+    for row in rows:
+        if not row["content"].strip():
+            categories: list[str] | None = []
+        else:
+            answer = answers.get(key_of.get(row["artifact_id"], ""))
+            categories = None if answer is None else list(answer)
+        if categories is not None:
+            labelled.append({k: row[k] for k in _FILE_LABELS_SCHEMA if k != "categories"})
+            labelled[-1]["categories"] = categories
+    frame = pl.DataFrame(labelled, schema=_FILE_LABELS_SCHEMA)
+    destination = file_labels_dir(output_dir, codebook, backend.provider, backend.model)
+    _write_parquet(frame, destination / FILE_LABELS)
+    with_answer = [cats for cats in frame["categories"].to_list() if cats]
+    summary = {
+        "provider": backend.provider,
+        "model": backend.model,
+        "prompt_version": CLASSIFY_FILE_VERSION,
+        "codebook": {
+            "path": str(codebook_path),
+            "label": codebook.label,
+            "fingerprint": codebook.fingerprint(),
+        },
+        "files": files.height,
+        "files_without_content": files.height - len(with_content),
+        "only_files": None if artifact_ids is None else len(set(artifact_ids)),
+        "only_kinds": None if kinds is None else sorted(set(kinds)),
+        "requests_planned": len({key for key in key_of.values()}),
+        "limit": limit,
+        "files_labelled": frame.height,
+        "coverage": round(frame.height / files.height, 4) if files.height else 0.0,
+        "other_share": round(sum(1 for c in with_answer if c == [OTHER]) / len(with_answer), 4)
+        if with_answer
+        else None,
+        "mean_categories": round(
+            sum(len(set(c) - {OTHER}) for c in with_answer) / len(with_answer), 3
+        )
+        if with_answer
+        else None,
         **report,
     }
     _write_manifest(destination / "classify.json", gold_dir, config, **summary)
@@ -1105,10 +1282,10 @@ def score_validation(
             "Nothing to compare: label the sheet (--human) or run `agm rq1 validate llm "
             "--replicate 2` for the stability."
         )
-    destination.mkdir(parents=True, exist_ok=True)
-    (destination / "scores.json").write_text(json.dumps(scores, indent=2), encoding="utf-8")
-    (destination / "scores.md").write_text(_scores_markdown(scores), encoding="utf-8")
-    return {"output": str(destination / "scores.json"), **_score_summary(scores)}
+    # Next to the model's labels, so scoring another model never overwrites these scores.
+    (llm_dir / "scores.json").write_text(json.dumps(scores, indent=2), encoding="utf-8")
+    (llm_dir / "scores.md").write_text(_scores_markdown(scores), encoding="utf-8")
+    return {"output": str(llm_dir / "scores.json"), **_score_summary(scores)}
 
 
 def _score_summary(scores: Mapping[str, Any]) -> dict[str, Any]:
@@ -1129,10 +1306,32 @@ def _score_summary(scores: Mapping[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def _scores_markdown(scores: Mapping[str, Any]) -> str:
-    def fmt(value: Any) -> str:
-        return "—" if value is None else f"{value:.2f}"
+def _fmt(value: Any) -> str:
+    return "—" if value is None else f"{value:.2f}"
 
+
+def _agreement_markdown(title: str, result: Mapping[str, Any]) -> list[str]:
+    """One comparison: its summary line and the per-category table."""
+    lines = [
+        f"## {title}",
+        "",
+        f"{result['sections']} sections; exact match {_fmt(result['exact_match'])}; "
+        f"macro kappa {_fmt(result['macro_kappa'])} {result['macro_kappa_ci95'] or ''}; "
+        f"macro F1 {_fmt(result['macro_f1'])}",
+        "",
+        "| category | kappa | precision | recall | F1 | prevalence A | prevalence B |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for row in result["categories"]:
+        lines.append(
+            f"| {row['category']} | {_fmt(row['kappa'])} | {_fmt(row['precision'])} | "
+            f"{_fmt(row['recall'])} | {_fmt(row['f1'])} | {row['prevalence_a']:.2f} | "
+            f"{row['prevalence_b']:.2f} |"
+        )
+    return [*lines, ""]
+
+
+def _scores_markdown(scores: Mapping[str, Any]) -> str:
     lines = [f"# RQ1 agreement ({scores['codebook']}, {scores['provider']} {scores['model']})", ""]
     titles = {
         "human_vs_llm": "Human × LLM",
@@ -1140,24 +1339,151 @@ def _scores_markdown(scores: Mapping[str, Any]) -> str:
         "human_retest": "Human × human (re-test)",
     }
     for comparison, title in titles.items():
-        if comparison not in scores:
-            continue
-        result = scores[comparison]
+        if comparison in scores:
+            lines += _agreement_markdown(title, scores[comparison])
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- model comparison
+
+
+class NothingToCompareError(RuntimeError):
+    """Neither model has labels the other has too (validation sample or classification)."""
+
+
+def _model_label(provider: str, model: str) -> str:
+    return f"{provider}:{model}"
+
+
+def _section_label_sets(path: Path) -> dict[str, frozenset[str]]:
+    frame = pl.read_parquet(path).select("section_key", "category").unique()
+    return {
+        key: frozenset(categories)
+        for key, categories in frame.group_by("section_key").agg(pl.col("category")).iter_rows()
+    }
+
+
+def _prevalence_comparison(a: pl.DataFrame, b: pl.DataFrame) -> pl.DataFrame:
+    """Both models' label prevalence side by side, per tool, kind and category."""
+    keys = ["tool", "kind", "category"]
+    columns = ["file_share", "section_share"]
+    joined = a.select(*keys, *columns).join(
+        b.select(*keys, *columns), on=keys, how="full", coalesce=True, suffix="_b"
+    )
+    joined = joined.rename({column: f"{column}_a" for column in columns}).with_columns(
+        pl.col(f"{column}_{side}").fill_null(0.0) for column in columns for side in "ab"
+    )
+    return joined.with_columns(
+        (pl.col(f"{column}_b") - pl.col(f"{column}_a")).alias(f"{column}_diff")
+        for column in columns
+    ).sort(*keys)
+
+
+def compare_models(
+    output_dir: Path,
+    *,
+    codebook_path: Path,
+    models: Sequence[tuple[str, str]],
+    human: Path | None = None,
+) -> dict[str, Any]:
+    """Compare two classifiers (``(provider, model)``, as A and B) with what each produced:
+
+    * validation sample (``agm rq1 validate llm --model``): human x A, human x B (with
+      ``human``, the filled sheet) and A x B;
+    * every section (``agm rq1 classify --model``): A x B and the label prevalence of both.
+
+    Writes ``compare/<codebook>/<A>__vs__<B>/`` (``compare.json``, ``compare.md`` and
+    ``prevalence.parquet``).
+    """
+    if len(models) != 2 or models[0] == models[1]:
+        raise ValueError("compare exactly two different models")
+    codebook = load_codebook(codebook_path)
+    categories = [*codebook.ids, OTHER]
+    labels = [_model_label(*m) for m in models]
+    validation = _validation_dir(output_dir, codebook) / "llm"
+    classified = output_dir / "classify" / _codebook_slug(codebook)
+    result: dict[str, Any] = {
+        "codebook": codebook.label,
+        "model_a": labels[0],
+        "model_b": labels[1],
+    }
+
+    replicates = [validation / p / model_slug(m) / "replicate-1.parquet" for p, m in models]
+    if all(path.exists() for path in replicates):
+        a, b = (_replicate_labels(path) for path in replicates)
+        sample: dict[str, Any] = {"a_vs_b": agreement(a, b, categories)}
+        if human is not None:
+            human_labels = read_sheet(human, categories)
+            if not human_labels:
+                raise InvalidSheetError(f"{human} has no labelled row yet")
+            sample["human_sections"] = len(human_labels)
+            sample["human_vs_a"] = agreement(human_labels, a, categories)
+            sample["human_vs_b"] = agreement(human_labels, b, categories)
+        result["validation"] = sample
+
+    destination = output_dir / "compare" / _codebook_slug(codebook)
+    destination = destination / "__vs__".join(model_slug(f"{p}_{m}") for p, m in models)
+    runs = [classified / p / model_slug(m) for p, m in models]
+    if all((run / "section_labels.parquet").exists() for run in runs):
+        a, b = (_section_label_sets(run / "section_labels.parquet") for run in runs)
+        # Thousands of sections: the intervals would be tiny and the bootstrap slow.
+        result["all_sections"] = {"a_vs_b": agreement(a, b, categories, bootstrap=0)}
+        prevalence = _prevalence_comparison(
+            *(pl.read_parquet(run / "label_prevalence.parquet") for run in runs)
+        )
+        _write_parquet(prevalence, destination / "prevalence.parquet")
+        result["all_sections"]["largest_file_share_differences"] = (
+            prevalence.sort(pl.col("file_share_diff").abs(), descending=True).head(10).to_dicts()
+        )
+
+    if "validation" not in result and "all_sections" not in result:
+        raise NothingToCompareError(
+            f"No labels of both {labels[0]} and {labels[1]}: run `agm rq1 validate llm --model "
+            "<provider:model>` (validation sample) or `agm rq1 classify --model "
+            "<provider:model>` (every section) for each model first."
+        )
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "compare.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    (destination / "compare.md").write_text(_compare_markdown(result), encoding="utf-8")
+    return {"output": str(destination / "compare.json"), **_compare_summary(result)}
+
+
+def _compare_summary(result: Mapping[str, Any]) -> dict[str, Any]:
+    headline = ("sections", "exact_match", "macro_kappa", "macro_kappa_ci95", "macro_f1")
+    summary: dict[str, Any] = {key: result[key] for key in ("codebook", "model_a", "model_b")}
+    for part in ("validation", "all_sections"):
+        if part in result:
+            summary[part] = {
+                name: {key: value[key] for key in headline}
+                for name, value in result[part].items()
+                if isinstance(value, dict) and "categories" in value
+            }
+    return summary
+
+
+def _compare_markdown(result: Mapping[str, Any]) -> str:
+    a, b = result["model_a"], result["model_b"]
+    lines = [f"# RQ1 model comparison ({result['codebook']})", "", f"A = {a}; B = {b}", ""]
+    titles = {"human_vs_a": f"Human × A ({a})", "human_vs_b": f"Human × B ({b})", "a_vs_b": "A × B"}
+    if "validation" in result:
+        lines += ["# Validation sample", ""]
+        for key, title in titles.items():
+            if key in result["validation"]:
+                lines += _agreement_markdown(title, result["validation"][key])
+    if "all_sections" in result:
+        part = result["all_sections"]
+        lines += ["# Every section", "", *_agreement_markdown("A × B", part["a_vs_b"])]
         lines += [
-            f"## {title}",
+            "## Largest differences in the share of files with a category",
             "",
-            f"{result['sections']} sections; exact match {fmt(result['exact_match'])}; "
-            f"macro kappa {fmt(result['macro_kappa'])} {result['macro_kappa_ci95'] or ''}; "
-            f"macro F1 {fmt(result['macro_f1'])}",
-            "",
-            "| category | kappa | precision | recall | F1 | prevalence A | prevalence B |",
-            "|---|---|---|---|---|---|---|",
+            "| tool | kind | category | files A | files B | B − A |",
+            "|---|---|---|---|---|---|",
         ]
-        for row in result["categories"]:
+        for row in part["largest_file_share_differences"]:
             lines.append(
-                f"| {row['category']} | {fmt(row['kappa'])} | {fmt(row['precision'])} | "
-                f"{fmt(row['recall'])} | {fmt(row['f1'])} | {row['prevalence_a']:.2f} | "
-                f"{row['prevalence_b']:.2f} |"
+                f"| {row['tool']} | {row['kind']} | {row['category']} | "
+                f"{row['file_share_a']:.2f} | {row['file_share_b']:.2f} | "
+                f"{row['file_share_diff']:+.2f} |"
             )
         lines.append("")
     return "\n".join(lines)

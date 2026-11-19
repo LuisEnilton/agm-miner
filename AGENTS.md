@@ -28,7 +28,9 @@ poetry run agm add-repo owner/name  #    registra repositórios à mão (marcado
 poetry run agm mine --workers 4     # 3. clone git parcial → commits, versões, mudanças
 poetry run agm export               # 4. banco → data/bronze/<timestamp>/*.parquet + manifest.json
 poetry run agm analyze              # 5. bronze → data/gold/<timestamp>/ (silver + gold por RQ)
+poetry run agm audit                # bronze → data/audit/<export>/: vieses (json, md e LaTeX)
 poetry run agm run --workers 4      # 1-3 em paralelo (processos filhos) até esvaziar, depois 4 e 5
+poetry run agm help [comando...]    # lista todos os comandos e o que fazem
 poetry run agm status [--watch]     # o que está rodando agora (lê o progresso salvo no banco)
 poetry run agm runs list | funnel   # execuções registradas / funil de seleção
 poetry run agm runs cleanup         # RUNNING sem heartbeat há > --minutes vira INTERRUPTED
@@ -36,6 +38,9 @@ poetry run agm rq1 sample           # RQ1: amostra para a criação de labels co
 poetry run agm rq1 propose | consolidate   # RQ1: rótulos livres → rascunho do codebook
 poetry run agm rq1 classify | saturation   # RQ1: categorias de todas as seções / cobertura
 poetry run agm rq1 validate export | llm | score   # RQ1: planilha cega, réplicas, kappa
+poetry run agm rq1 compare --model p:m --model p:m # RQ1: dois classificadores comparados
+poetry run agm rq2 summary [--compare DIR]  # RQ2: tabelas de estrutura (lado a lado com outro gold)
+poetry run agm figures --model p:m --codebook F  # figuras do artigo (TikZ/pgfplots) em figuras.tex
 
 poetry run pytest                   # precisa do Postgres (TEST_DATABASE_URL, criado sozinho)
 poetry run ruff check . && poetry run ruff format .
@@ -61,7 +66,16 @@ src/agm_miner/
   git/                # runner (subprocess -z, streaming, timeout), parsing (puro), repository
   github/client.py    # REST code search + GraphQL, com pacing, quota por bucket e retry limitado
   stages/             # discovery, selection, mining (persistência + concorrência), export
-  analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets
+  analysis/           # markdown (AST), metrics, structure_diff, authors, stats, datasets,
+                      # rq2_summary (tabelas da RQ2 a partir de rq2_structure; agm rq2 summary),
+                      # history_cutoff (corta o histórico na reference_date antes do analyze;
+                      # a auditoria mede o que ele remove), sampling_audit (cobertura da
+                      # descoberta, efeito de cada critério, falhas e cobertura dos artefatos a
+                      # partir do bronze; agm audit), audit_latex (macros, tabelas e rascunho
+                      # em LaTeX da auditoria, para o artigo; toda macro usada no rascunho
+                      # precisa existir no audit.tex), paper_figures (figuras do artigo em
+                      # TikZ/pgfplots, uma macro por figura no figuras.tex; agm figures;
+                      # porcentagens arredondadas uma vez, das contagens exatas)
   rq1/                # RQ1 com LLM: units (section_key), sampling, codebook, llm (SDK anthropic,
                       # Batches), store (cache + estado dos lotes), execution (lotes retomáveis),
                       # backends (PromptRequest neutro; Anthropic, Gemini e OpenRouter)
@@ -80,6 +94,24 @@ Princípios que precisam ser mantidos:
    padrões de bot/agente, janela de burst). Cada execução guarda um snapshot e o hash desse arquivo.
 3. **A análise não acessa o banco**: ela lê apenas `data/bronze/<export>/`, que é a unidade de
    replicação. `analysis_manifest.json` registra o export de origem, a config e o `code_version`.
+   **Memória do `analyze`:** o `content` das versões passa de 4 GB descomprimido, e estourar a
+   RAM do WSL derruba o VS Code junto. O que mantém o pico em poucos GB:
+   - `load_bronze` carrega `artifact_versions` sem `content`, que `build_version_tables` lê em
+     fatias (`read_version_contents`: `scan_parquet` + `slice`; o `ParquetFile.iter_batches`
+     do pyarrow retinha no pool tudo o que já tinha lido). `commit_files` (11 milhões de
+     linhas) não é carregado: `co_changed_counts` o agrega de um scan em modo streaming.
+   - `clear_syllable_cache` limpa a cada lote o cache do pyphen (usado pelo textstat), que
+     guardava cada palavra distinta do corpus sem limite.
+   - A RQ3 guarda só um `DocumentOutline` (digests das seções + frontmatter) por blob.
+   - Saídas grandes vão para o disco em blocos (`_write_chunks`): `silver_version_sections`
+     durante o parse, `rq1_sections` (fatias do arquivo de seções filtradas na consulta e
+     ordenadas pelas chaves) e `rq3_changes` (a mensagem do commit entra bloco a bloco).
+     As outras são gravadas e liberadas assim que ficam prontas.
+   - Strings do polars compartilham buffers: um `filter`/`gather` sobre um frame coletado
+     mantém o frame inteiro vivo. Filtre dentro da consulta lazy.
+
+   Não carregue o conteúdo inteiro nem acumule linhas de tabelas grandes em listas Python
+   (`_FrameChunks`). Para medir, rode com `systemd-run --user --scope -p MemoryMax=5G`.
 4. **Mineração idempotente**: `persist_extraction` apaga e reinsere os dados do repositório numa
    única transação. Cada repositório é protegido por `pg_try_advisory_lock(repo_id)`. Erros viram
    `FAILED` + `last_error` + `attempts`.
@@ -177,13 +209,26 @@ falha se a migração divergir dos modelos.
 - A chave do cache (`store.request_key`) precisa cobrir tudo o que determina a resposta (fase,
   provedor, modelo, versão do prompt, hash do codebook, `section_key`). Ao mudar um prompt, mude a
   versão.
+- Dois classificadores: `--model provedor:modelo` (`Rq1Config.with_model`) troca provedor e
+  `classify_model` numa execução de `classify`, `saturation`, `validate llm/score` e
+  `agentreadmes score` (no `smoke`, o modelo da fase de `--phase`). Tudo o que um
+  modelo gera fica em pastas por provedor/modelo (o score de validação inclusive), e
+  `stages.compare_models` compara dois modelos na amostra de validação e em todas as seções.
 - Validação externa (`rq1/agentreadmes.py`): `agm rq1 agentreadmes import` grava o dataset do
   *Agent READMEs* em `DATA_DIR/external/agentreadmes/` no formato da saída do `analyze`
   (`rq1_sections` + `analysis_manifest.json`), então todos os comandos da RQ1 rodam nele com
-  `--gold`. Os rótulos do artigo são mapeados por tabela explícita para o
+  `--gold`. Também grava `rq2_structure`, montado pelo próprio `build_rq2_structure` (mesmas
+  colunas e tipos da tabela gold; `version_id` = `artifact_id`), para comparar a RQ2 com os
+  arquivos do artigo. Os rótulos do artigo são mapeados por tabela explícita para o
   `seed_agent_readmes.yaml`; um rótulo desconhecido faz a importação falhar. O `score` agrega as
   categorias das seções por arquivo e compara com os rótulos humanos, com o GPT-5 como linha de
-  base. Nada é filtrado na importação (o `COPILOT` fica); `--tool` filtra no score.
+  base. Nada é filtrado na importação (o `COPILOT` fica); `--tool` filtra no score e
+  `classify --only-labelled` classifica só os arquivos com rótulos de referência.
+- `classify --unit file` (`stages.classify_files`, prompt `classify-file-v1`) classifica cada
+  arquivo inteiro numa requisição (estratégia do artigo), lendo o `file_contents.parquet` que só
+  a importação grava. A chave do cache usa o hash do conteúdo, e a saída fica em
+  `classify-file/`. `agentreadmes score --unit file` pontua essa saída e a compara com a
+  classificação por seção do mesmo modelo (`section_vs_file`).
 - Modelos, effort e tamanhos de amostra ficam em `rq1:` no `study.yaml`; o codebook curado fica em
   `codebooks/` (versionado). Testes usam SDKs/clientes falsos, nunca a API real.
 
@@ -227,8 +272,20 @@ Toda mudança vem com teste. Marcadores: `db` (Postgres, pulado se não houver s
   `stars:` não funciona nela, por isso o filtro de estrelas fica no estágio `select`.
 - As heurísticas de "tutorial/lista" (`exclude_keywords`), de bots, de agentes e dos papéis de
   autor precisam de validação manual numa amostra antes da coleta final.
-- `hours_since_previous_change` usa a data de autoria (rebases podem distorcer). Flesch só é
-  calculado para textos detectados como inglês, e listas sem pontuação distorcem o índice.
+- `hours_since_previous_change` usa a data de autoria (rebases podem distorcer).
+- Flesch só é calculado para textos detectados como inglês, e sobre `readability_text`
+  (`analysis/markdown.py`): parágrafos e itens de lista, sem títulos, tabelas e código. Cada
+  bloco é tratado como uma frase e termina em `.!?` (o textstat só separa frases por esses três
+  sinais; `:;,` no fim viram ponto). Blocos de 1 ou 2 palavras (rótulos, links soltos) ficam de
+  fora, porque o textstat não os conta como frases mas contaria as palavras. Sem isso, um arquivo
+  só de bullets virava uma frase única (grau acima de 20). Ainda distorcem o índice os blocos
+  formados por caminhos ou URLs sem espaços (muitas sílabas por "palavra").
+- Itens de lista tight não contam como parágrafos, URLs soltas contam como links e o BOM UTF-8 é
+  ignorado antes do frontmatter.
+- A mineração leva semanas; com `analysis.truncate_at_reference_date` o `analyze` corta o
+  histórico no fim da `reference_date` (`analysis/history_cutoff.py`, aplicado às tabelas do
+  bronze logo depois de carregá-las). Não dá para cortar `identities.commits` nem
+  `contributor_activity` (agregados do clone inteiro), nem os metadados da seleção.
 - `reference_date` no `study.yaml` fica fixa durante a coleta. O corte `created_before` do estudo
   (2026-08-01) é mais tardio que o dos artigos relacionados (2024-01-01, o padrão de `config.py`),
   então a amostra inclui projetos criados já com agentes.

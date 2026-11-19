@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from agm_miner.git.runner import GitRunner, terminate_active_processes
+from agm_miner.git.runner import GitRunner, GitTimeoutError, terminate_active_processes
 from agm_miner.runs import interrupt_signals
 
 pytestmark = pytest.mark.git
@@ -50,3 +50,19 @@ def test_ignored_sigint_is_restored_to_keyboard_interrupt() -> None:
         assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+def test_timeout_kills_the_whole_process_group(tmp_path) -> None:
+    """A grandchild (like clone's index-pack) must not outlive the timeout holding the pipes."""
+    pid_file = tmp_path / "child.pid"
+    script = f"sleep 120 & echo $! > {pid_file}; wait"
+    runner = GitRunner(None, timeout_seconds=1)
+    started = time.monotonic()
+    with pytest.raises(GitTimeoutError):
+        runner.run(["-c", f"alias.slow=!{script}", "slow"])
+    assert time.monotonic() - started < 30
+    child = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        for _ in range(50):  # the killed child is reaped by init, give it a moment
+            os.kill(child, 0)
+            time.sleep(0.1)

@@ -6,21 +6,27 @@ agm add-repo NAME...    register repositories by name (validation runs)
 agm mine                mine selected repositories from git clones (stage 3)
 agm export              dump the database as a bronze Parquet dataset (stage 4)
 agm analyze             build silver/gold analysis datasets from a bronze export (stage 5)
+agm audit               sampling audit of a bronze export (coverage, filters, failures)
 agm run                 run stages 1-3 in parallel until done, then 4 and 5
 agm status              what is running now and how far it got (also from another terminal)
 agm runs list|funnel    inspect pipeline runs and the selection funnel
 agm rq1 ...             RQ1 content coding with an LLM (sample, propose, classify, validate)
+agm rq2 summary         RQ2 structure tables, optionally next to another dataset
+agm figures             the paper's figures as LaTeX (TikZ/pgfplots) from the analysis outputs
+agm help [COMMAND...]   list every command and what it does
 """
 
 from __future__ import annotations
 
 import functools
 import json
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any, ParamSpec, TypeVar
 
+import click
 import typer
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -53,6 +59,8 @@ rq1_agentreadmes_app = typer.Typer(
     help="External validation on the Agent READMEs dataset (import, score).",
 )
 rq1_app.add_typer(rq1_agentreadmes_app, name="agentreadmes")
+rq2_app = typer.Typer(no_args_is_help=True, help="RQ2 structure: summary tables of rq2_structure.")
+app.add_typer(rq2_app, name="rq2")
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -92,6 +100,8 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
 
     @functools.wraps(command)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        from agm_miner.analysis.paper_figures import FiguresInputError
+        from agm_miner.analysis.sampling_audit import AuditOutputError
         from agm_miner.database.schema import SchemaMismatchError
         from agm_miner.git.runner import GitError
         from agm_miner.github.client import GitHubAuthError, GitHubRequestError
@@ -101,6 +111,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
         from agm_miner.rq1.stages import (
             IncompleteProposalsError,
             InvalidSheetError,
+            NothingToCompareError,
             SampleMismatchError,
             ValidationSheetExistsError,
         )
@@ -120,6 +131,8 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             )
             raise typer.Exit(code=130) from exc
         except (
+            AuditOutputError,
+            FiguresInputError,
             SchemaMismatchError,
             StageBusyError,
             GitError,
@@ -132,6 +145,7 @@ def _handle_errors(command: Callable[P, R]) -> Callable[P, R]:
             SampleMismatchError,
             IncompleteProposalsError,
             InvalidSheetError,
+            NothingToCompareError,
             ValidationSheetExistsError,
             SelectionError,
             RepositoryLookupError,
@@ -295,8 +309,37 @@ def analyze(
     bronze_dir = bronze or latest_export(settings.bronze_dir)
     output_dir = output or settings.gold_dir / bronze_dir.name
     with publishing(Progress("ANALYZE")) as progress, _showing_progress():
-        counts = build_datasets(bronze_dir, output_dir, study.analysis, progress)
+        counts = build_datasets(
+            bronze_dir,
+            output_dir,
+            study.analysis,
+            progress,
+            history_cutoff=study.history_cutoff(),
+        )
     _print({"output": str(output_dir), **counts})
+
+
+@app.command()
+@_handle_errors
+def audit(
+    bronze: Annotated[
+        Path | None, typer.Option(help="Bronze export directory (default: the latest one).")
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option(help="Output directory (default: DATA_DIR/audit/<export>).")
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Sampling audit of a bronze export: discovery coverage, selection effects, mining failures
+    and artifact coverage, with warnings (audit.json and audit.md; no database needed)."""
+    from agm_miner.analysis.sampling_audit import write_audit
+    from agm_miner.runs import code_version
+    from agm_miner.stages.export import latest_export
+
+    settings, study = _context(study_path)
+    bronze_dir = bronze or latest_export(settings.bronze_dir)
+    output_dir = output or settings.data_dir / "audit" / bronze_dir.name
+    _print(write_audit(bronze_dir, output_dir, study, code_version=code_version()))
 
 
 @app.command()
@@ -436,6 +479,54 @@ def status(
                 live.update(render_status(*current()), refresh=True)
     except KeyboardInterrupt:
         return  # leaving --watch is not an interruption of any work
+
+
+def _summary(command: Any) -> str:
+    """First sentence of a command's help text."""
+    text = (command.help or command.short_help or "").strip()
+    paragraph = text.split("\n\n", 1)[0].replace("\n", " ").strip()
+    return re.split(r"(?<=[.])\s", paragraph, maxsplit=1)[0]
+
+
+def _command_lines(group: Any, prefix: str) -> list[tuple[str, str]]:
+    """(full name, summary) of every runnable command below ``group``, depth first."""
+    lines: list[tuple[str, str]] = []
+    for name in group.list_commands(None):
+        command = group.get_command(None, name)
+        if command is None or command.hidden:
+            continue
+        full = f"{prefix} {name}".strip()
+        if hasattr(command, "list_commands"):
+            lines.extend(_command_lines(command, full))
+        else:
+            lines.append((full, _summary(command)))
+    return lines
+
+
+@app.command("help")
+def help_command(
+    ctx: typer.Context,
+    command: Annotated[
+        list[str] | None,
+        typer.Argument(help="Show only the commands under this name (e.g. `rq1 validate`)."),
+    ] = None,
+) -> None:
+    """List every agm command and what it does (`agm help rq1` narrows it down)."""
+    root = ctx.find_root().command
+    group, prefix = root, ""
+    for word in command or []:
+        found = group.get_command(None, word) if hasattr(group, "list_commands") else None
+        if found is None:
+            raise typer.BadParameter(f"unknown command: {' '.join(command or [])}")
+        group, prefix = found, f"{prefix} {word}".strip()
+    if hasattr(group, "list_commands"):
+        lines = _command_lines(group, prefix)
+    else:
+        lines = [(prefix, _summary(group))]
+    width = max((len(name) for name, _ in lines), default=0)
+    for name, summary in lines:
+        typer.echo(f"agm {name.ljust(width)}  {summary}")
+    typer.echo("\nDetails of a command: agm <command> --help")
 
 
 @runs_app.command("list")
@@ -632,6 +723,10 @@ def rq1_smoke(
     phase: Annotated[
         str, typer.Option(help="Which phase's model to try: propose, consolidate or classify.")
     ] = "classify",
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="Try this model for the phase instead, as provider:model."),
+    ] = None,
     study_path: StudyOption = None,
 ) -> None:
     """One tiny request to the configured provider: checks the key, the model and that it
@@ -641,6 +736,7 @@ def rq1_smoke(
     if phase not in ("propose", "consolidate", "classify"):
         raise typer.BadParameter("phase must be propose, consolidate or classify")
     settings, study = _context(study_path)
+    study = _with_model(study, model, phase)
     backend = make_backend(settings, study.rq1, phase)
     result = backend.complete(
         PromptRequest(
@@ -675,12 +771,51 @@ CodebookOption = Annotated[
 ]
 
 
-def _rq1_backend_run(stage: str, phase: str, study_path: Path | None, gold: Path | None, run):
+ModelOption = Annotated[
+    str | None,
+    typer.Option(
+        "--model",
+        help="Classifier as provider:model, e.g. gemini:gemini-3.5-flash-lite (default: "
+        "rq1.provider and rq1.classify_model).",
+    ),
+]
+
+
+UnitOption = Annotated[
+    str,
+    typer.Option(
+        click_type=click.Choice(["section", "file"]),
+        help="Classify each section (section) or each whole file in one request (file, the "
+        "Agent READMEs paper's strategy; needs a dataset imported with its file contents).",
+    ),
+]
+
+
+def _with_model(study: StudyConfig, model: str | None, phase: str = "classify") -> StudyConfig:
+    """``study`` with the ``--model`` model for ``phase`` (recorded in every manifest's
+    rq1_config)."""
+    if model is None:
+        return study
+    try:
+        return study.model_copy(update={"rq1": study.rq1.with_model(model, phase)})
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--model") from exc
+
+
+def _rq1_backend_run(
+    stage: str,
+    phase: str,
+    study_path: Path | None,
+    gold: Path | None,
+    run,
+    model: str | None = None,
+):
     """Shared plumbing of the LLM commands: backend of ``phase``, live progress, JSON result."""
     from agm_miner.progress import Progress, publishing
     from agm_miner.rq1.backends import make_backend
 
     settings, study = _context(study_path)
+    study = _with_model(study, model)
     gold_dir, output_dir = _rq1_dirs(settings, gold)
     backend = make_backend(settings, study.rq1, phase)
     with publishing(Progress(stage)) as progress, _showing_progress():
@@ -696,33 +831,60 @@ def rq1_classify(
     limit: Annotated[
         int | None, typer.Option(min=1, help="Send at most N requests (a pilot run).")
     ] = None,
+    only_labelled: Annotated[
+        bool,
+        typer.Option(
+            help="Only the files with reference labels in --gold (an imported dataset such "
+            "as Agent READMEs): what `agentreadmes score` needs, for a fraction of the cost."
+        ),
+    ] = False,
+    kind: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--kind",
+            click_type=click.Choice(["INSTRUCTION", "SKILL_MANIFEST", "SKILL_RESOURCE"]),
+            help="Only artifacts of this kind (repeatable), e.g. --kind INSTRUCTION --kind "
+            "SKILL_MANIFEST to leave out the skills' resource files.",
+        ),
+    ] = None,
+    unit: UnitOption = "section",
+    model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
-    """Categories of every section with text (rq1.classify_model), file by file. Cached and
-    resumable: run it again after an interruption or a daily limit."""
-    from agm_miner.rq1.stages import classify_sections
+    """Categories of every section with text (rq1.classify_model), file by file; with --unit
+    file, of every whole file, one request per file. Cached and resumable: run it again after an
+    interruption or a daily limit."""
+    from agm_miner.rq1.agentreadmes import labelled_artifact_ids
+    from agm_miner.rq1.stages import classify_files, classify_sections
 
+    classify = classify_sections if unit == "section" else classify_files
     _rq1_backend_run(
         "RQ1 CLASSIFY",
         "classify",
         study_path,
         gold,
-        lambda gold_dir, output_dir, study, backend, progress: classify_sections(
+        lambda gold_dir, output_dir, study, backend, progress: classify(
             gold_dir,
             output_dir,
             study.rq1,
             backend,
             codebook_path=codebook or study.rq1.codebook,
             limit=limit,
+            artifact_ids=labelled_artifact_ids(gold_dir) if only_labelled else None,
+            kinds=kind,
             progress=progress,
         ),
+        model,
     )
 
 
 @rq1_app.command("saturation")
 @_handle_errors
 def rq1_saturation(
-    gold: GoldOption = None, codebook: CodebookOption = None, study_path: StudyOption = None
+    gold: GoldOption = None,
+    codebook: CodebookOption = None,
+    model: ModelOption = None,
+    study_path: StudyOption = None,
 ) -> None:
     """Classify a fresh sample to measure how many sections fit no category."""
     from agm_miner.rq1.stages import saturation
@@ -740,6 +902,7 @@ def rq1_saturation(
             codebook_path=codebook or study.rq1.codebook,
             progress=progress,
         ),
+        model,
     )
 
 
@@ -777,6 +940,7 @@ def rq1_validate_llm(
     replicate: Annotated[
         int, typer.Option(min=1, help="1 for the LLM labels, 2+ for stability repetitions.")
     ] = 1,
+    model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """The LLM's labels for the validation sample (rq1.classify_model)."""
@@ -796,6 +960,7 @@ def rq1_validate_llm(
             replicate=replicate,
             progress=progress,
         ),
+        model,
     )
 
 
@@ -811,12 +976,14 @@ def rq1_validate_score(
     ] = None,
     gold: GoldOption = None,
     codebook: CodebookOption = None,
+    model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """Agreement: human x LLM, LLM x LLM (stability) and human x human (re-test)."""
     from agm_miner.rq1.stages import score_validation
 
     settings, study = _context(study_path)
+    study = _with_model(study, model)
     _, output_dir = _rq1_dirs(settings, gold)
     _print(
         score_validation(
@@ -827,6 +994,48 @@ def rq1_validate_score(
             retest=retest,
             provider=study.rq1.provider,
             model=study.rq1.classify_model,
+        )
+    )
+
+
+@rq1_app.command("compare")
+@_handle_errors
+def rq1_compare(
+    model: Annotated[
+        list[str],
+        typer.Option(
+            "--model", help="A classifier as provider:model; give exactly two (A, then B)."
+        ),
+    ],
+    human: Annotated[
+        Path | None,
+        typer.Option(help="The filled validation sheet, for human x A and human x B."),
+    ] = None,
+    gold: GoldOption = None,
+    codebook: CodebookOption = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Compare two classifiers: on the validation sample (human x A, human x B, A x B) and on
+    every section (A x B, label prevalence), with what `validate llm --model` and `classify
+    --model` produced for each."""
+    from agm_miner.rq1.stages import compare_models
+
+    if len(model) != 2:
+        raise typer.BadParameter("give exactly two models", param_hint="--model")
+    settings, study = _context(study_path)
+    models = []
+    for spec in model:
+        rq1 = _with_model(study, spec).rq1
+        models.append((rq1.provider, rq1.classify_model))
+    if models[0] == models[1]:
+        raise typer.BadParameter("the two models must differ", param_hint="--model")
+    _, output_dir = _rq1_dirs(settings, gold)
+    _print(
+        compare_models(
+            output_dir,
+            codebook_path=codebook or study.rq1.codebook,
+            models=models,
+            human=human,
         )
     )
 
@@ -850,12 +1059,14 @@ def rq1_agentreadmes_import(
         typer.Option(help="Output folder (default: DATA_DIR/external/agentreadmes)."),
     ] = None,
     force: Annotated[bool, typer.Option(help="Replace an existing output.")] = False,
+    study_path: StudyOption = None,
 ) -> None:
-    """Import the Agent READMEs files (and the paper's labels) as an analysis output; then run
+    """Import the Agent READMEs files (and the paper's labels) as an analysis output, with the
+    RQ2 metrics of every file (rq2_structure); then run
     `agm rq1 classify --gold <output> --codebook codebooks/seed_agent_readmes.yaml`."""
     from agm_miner.rq1.agentreadmes import import_agentreadmes
 
-    settings, _ = _context(None)
+    settings, study = _context(study_path)
     _print(
         import_agentreadmes(
             dataset,
@@ -863,6 +1074,7 @@ def rq1_agentreadmes_import(
             human_path=human_labels,
             gpt5_path=gpt5_labels,
             force=force,
+            analysis=study.analysis,
         )
     )
 
@@ -881,13 +1093,17 @@ def rq1_agentreadmes_score(
         list[str] | None,
         typer.Option("--tool", help="Score only this tool (CLAUDE, AGENTS, COPILOT); repeatable."),
     ] = None,
+    unit: UnitOption = "section",
+    model: ModelOption = None,
     study_path: StudyOption = None,
 ) -> None:
     """File-level agreement of the classification with the paper's human labels, next to GPT-5,
-    overall and per tool (model: rq1.provider and rq1.classify_model)."""
+    overall and per tool (model: --model, or rq1.provider and rq1.classify_model). With --unit
+    file, also compares the whole-file and the per-section classification of the model."""
     from agm_miner.rq1.agentreadmes import score_agentreadmes
 
     settings, study = _context(study_path)
+    study = _with_model(study, model)
     gold_dir, output_dir = _rq1_dirs(settings, gold or settings.external_dir / "agentreadmes")
     _print(
         score_agentreadmes(
@@ -898,6 +1114,122 @@ def rq1_agentreadmes_score(
             provider=study.rq1.provider,
             model=study.rq1.classify_model,
             tools=tool,
+            unit=unit,
+        )
+    )
+
+
+@rq2_app.command("summary")
+@_handle_errors
+def rq2_summary(
+    gold: Annotated[
+        Path | None,
+        typer.Option(help="Analysis output to summarise (default: the latest in DATA_DIR/gold)."),
+    ] = None,
+    compare: Annotated[
+        Path | None,
+        typer.Option(
+            help="Another analysis output summarised with the same filters, side by side "
+            "(e.g. DATA_DIR/external/agentreadmes, the Agent READMEs paper's files)."
+        ),
+    ] = None,
+    min_bytes: Annotated[
+        int | None,
+        typer.Option(help="Smallest file kept (default: analysis.min_artifact_bytes)."),
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """Size, headings, elements, readability and SKILL.md frontmatter per file type, for all
+    files and root files only, per file and one file per repository. Written to
+    DATA_DIR/rq2/<gold name>/ (rq2_summary.json and .md)."""
+    from agm_miner.analysis.datasets import latest_analysis
+    from agm_miner.analysis.rq2_summary import write_summary
+    from agm_miner.runs import code_version
+
+    settings, study = _context(study_path)
+    gold_dir = gold or latest_analysis(settings.gold_dir)
+    output_dir = settings.data_dir / "rq2" / gold_dir.name
+    if compare is not None:
+        output_dir = output_dir.with_name(f"{gold_dir.name}__vs__{compare.name}")
+    _print(
+        write_summary(
+            gold_dir,
+            output_dir,
+            min_bytes=study.analysis.min_artifact_bytes if min_bytes is None else min_bytes,
+            compare_dir=compare,
+            code_version=code_version(),
+        )
+    )
+
+
+@app.command("figures")
+@_handle_errors
+def figures(
+    gold: Annotated[
+        Path | None,
+        typer.Option(help="Analysis output (default: the latest in DATA_DIR/gold)."),
+    ] = None,
+    audit_dir: Annotated[
+        Path | None,
+        typer.Option("--audit", help="Audit of the same export (default: DATA_DIR/audit/<gold>)."),
+    ] = None,
+    compare: Annotated[
+        Path | None,
+        typer.Option(
+            help="Imported Agent READMEs files (default: DATA_DIR/external/agentreadmes)."
+        ),
+    ] = None,
+    model: ModelOption = None,
+    codebook: CodebookOption = None,
+    labels: Annotated[
+        Path | None,
+        typer.Option(
+            help="RQ1 classify folder of the analysis (default: DATA_DIR/rq1/<gold>/classify/"
+            "<codebook>/<provider>/<model>)."
+        ),
+    ] = None,
+    compare_labels: Annotated[
+        Path | None,
+        typer.Option(
+            help="RQ1 classify folder of the Agent READMEs files (default: the same folder under "
+            "DATA_DIR/rq1/<compare name>)."
+        ),
+    ] = None,
+    output: Annotated[
+        Path | None, typer.Option(help="Output folder (default: DATA_DIR/figures/<gold>).")
+    ] = None,
+    study_path: StudyOption = None,
+) -> None:
+    """The paper's figures (pipeline, QP2 elements, QP1 categories) as LaTeX macros in
+    figuras.tex, computed from the analysis, the audit and the RQ1 classification (no database).
+    """
+    from agm_miner.analysis.datasets import latest_analysis
+    from agm_miner.analysis.paper_figures import write_figures
+    from agm_miner.rq1.codebook import load_codebook
+    from agm_miner.rq1.stages import model_slug
+    from agm_miner.runs import code_version
+
+    settings, study = _context(study_path)
+    study = _with_model(study, model)
+    gold_dir = gold or latest_analysis(settings.gold_dir)
+    compare_dir = compare or settings.external_dir / "agentreadmes"
+    loaded = load_codebook(codebook or study.rq1.codebook)
+
+    def classify_dir(dataset: Path) -> Path:
+        folder = settings.rq1_dir / dataset.name / "classify" / model_slug(loaded.label)
+        return folder / study.rq1.provider / model_slug(study.rq1.classify_model)
+
+    _print(
+        write_figures(
+            gold_dir=gold_dir,
+            audit_dir=audit_dir or settings.data_dir / "audit" / gold_dir.name,
+            compare_dir=compare_dir,
+            labels_dir=labels or classify_dir(gold_dir),
+            compare_labels_dir=compare_labels or classify_dir(compare_dir),
+            output_dir=output or settings.data_dir / "figures" / gold_dir.name,
+            categories=loaded.ids,
+            names={category.id: category.name for category in loaded.categories},
+            code_version=code_version(),
         )
     )
 

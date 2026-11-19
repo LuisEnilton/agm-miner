@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import pyphen
 import textstat
 from langdetect import DetectorFactory, LangDetectException, detect
 
@@ -13,6 +14,18 @@ from agm_miner.analysis.markdown import ParsedDocument, parse_document
 
 # langdetect is probabilistic; a fixed seed makes results reproducible.
 DetectorFactory.seed = 0
+
+
+def clear_syllable_cache() -> None:
+    """Empty the word cache of pyphen, which textstat uses to count syllables.
+
+    pyphen memoizes the hyphenation of every distinct word it sees, without bound; over the
+    whole corpus (identifiers, paths, URLs) that grew by gigabytes. The cache only saves time,
+    so clearing it never changes a result."""
+    for dictionary in getattr(pyphen, "hdcache", {}).values():
+        cache = getattr(dictionary, "cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,8 +82,9 @@ def compute_metrics(
     document = parse_document(text)
     levels = [heading.level for heading in document.headings]
     language = detect_language(document.prose, min_chars_for_language)
-    # Flesch formulas are only defined for English text.
-    readable = language == "en"
+    # Flesch formulas are only defined for English text, and need at least one sentence of
+    # paragraph or list text (a document of headings and code has none).
+    readable = language == "en" and bool(document.readability_text)
     frontmatter_valid = None if not document.has_frontmatter else document.frontmatter is not None
     metrics = DocumentMetrics(
         lines=document.line_count,
@@ -107,7 +121,11 @@ def compute_metrics(
         ),
         heading_tree_json=json.dumps(document.heading_tree(), ensure_ascii=False),
         language=language,
-        flesch_reading_ease=textstat.flesch_reading_ease(document.prose) if readable else None,
-        flesch_kincaid_grade=textstat.flesch_kincaid_grade(document.prose) if readable else None,
+        flesch_reading_ease=(
+            textstat.flesch_reading_ease(document.readability_text) if readable else None
+        ),
+        flesch_kincaid_grade=(
+            textstat.flesch_kincaid_grade(document.readability_text) if readable else None
+        ),
     )
     return metrics, document

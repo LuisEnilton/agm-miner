@@ -1191,6 +1191,24 @@ files = [
 six = "*"
 
 [[package]]
+name = "linkify-it-py"
+version = "2.2.0"
+description = "Links recognition library with FULL unicode support."
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "linkify_it_py-2.2.0-py3-none-any.whl", hash = "sha256:3adc40eb5af300b2605fcfdb968c24e1d780a90f1f2221af7c15e5111e94d443"},
+    {file = "linkify_it_py-2.2.0.tar.gz", hash = "sha256:907acd2d17ac1fbb9ddb62c8957ccbd6158cac602231a15c3b0cd1e215f03cee"},
+]
+
+[package.extras]
+benchmark = ["pytest", "pytest-benchmark"]
+dev = ["black", "flake8", "isort", "pre-commit", "pyproject-flake8"]
+doc = ["myst-parser", "sphinx", "sphinx_book_theme"]
+test = ["coverage", "pytest", "pytest-cov", "pytest-timeout"]
+
+[[package]]
 name = "mako"
 version = "1.3.12"
 description = "A super-fast templating language that borrows the best ideas from the existing templating languages."
@@ -3218,4 +3236,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<4.0"
-content-hash = "ca342704a0fbe00630ca8f4778698f37c7a0bc6fd98c205816a544159b4477dc"
+content-hash = "38b6b2debd9a99aa270e0e802cec7164f3a1330f29fc3b858345e54f1b339335"

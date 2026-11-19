@@ -35,7 +35,12 @@ agm discover → agm select → agm mine → agm export → agm analyze
 5. **analyze**: a partir de um export bronze, sem precisar do banco, gera em
    `data/gold/<timestamp>/` as tabelas `rq1_sections`, `rq2_structure`, `rq3_changes`,
    `rq3_author_roles` e `repo_features`. As tabelas gold contêm só a amostra do estudo (critérios
-   que dependem do histórico minerado); as silver guardam tudo.
+   que dependem do histórico minerado); as silver guardam tudo. O conteúdo das versões é lido em
+   lotes e as seções vão para o disco à medida que são geradas, então nem o conteúdo nem as
+   seções ficam inteiros na memória; as demais tabelas do bronze (como `commits`, com as
+   mensagens) ainda são carregadas, e o pico cresce com elas. Para garantir que um erro de memória derrube só o analyze, e
+   não o VS Code junto (no WSL os dois dividem a mesma VM), rode com um teto:
+   `systemd-run --user --scope -p MemoryMax=5G poetry run agm analyze`.
 
 Toda execução fica registrada em `pipeline_runs`, com parâmetros, estatísticas, o snapshot do
 `study.yaml` e o commit do código. Isso garante a rastreabilidade do dataset.
@@ -381,6 +386,31 @@ selection:
 
 As datas são escritas no formato `AAAA-MM-DD`, sem aspas.
 
+#### Corte do histórico na data de referência
+
+A mineração leva semanas, então cada repositório é clonado num dia diferente. Com
+`analysis.truncate_at_reference_date: true` (o valor do `study.yaml`), o `analyze` corta o
+histórico no fim da `reference_date` (meia-noite UTC do dia seguinte), como se todos os
+repositórios tivessem sido minerados nesse instante:
+
+- commits feitos depois do corte saem da análise, com as mudanças de artefatos, os arquivos e os
+  co-autores deles;
+- um artefato alterado depois do corte é analisado no estado da última mudança antes dele (ou
+  some, se essa mudança foi uma remoção); um artefato criado depois do corte ainda não existia e
+  sai da análise. Um artefato sem mudanças depois do corte fica como estava no HEAD minerado,
+  inclusive os poucos sem nenhuma mudança registrada (alterados só em commits de merge);
+- autores cujo primeiro commit é posterior ao corte saem da análise, e a atividade mensal termina
+  no mês do corte.
+
+O minerador continua gravando o histórico inteiro: o corte é feito só na análise, e o
+`analysis_manifest.json` registra a data e o que foi removido (`history_cutoff`). Ele exige uma
+`reference_date` fixa. Duas coisas não podem ser cortadas e precisam ser declaradas no artigo: o
+total de commits de cada autor e o perfil de atividade dele (`identities.commits`,
+`contributor_activity`, usados nos papéis de autor) cobrem o histórico inteiro do clone, e os
+metadados do GitHub (estrelas, licença, linguagem) são do momento da seleção. Os commits são
+datados por `committed_at`; um commit feito antes do corte e integrado ao branch depois dele
+continua na análise.
+
 #### Licenças
 
 ```yaml
@@ -492,6 +522,7 @@ pastas de saída, então os testes nunca se misturam com a coleta.
 ```bash
 poetry run agm rq1 models            # modelos do provedor configurado (--provider gemini|openrouter)
 poetry run agm rq1 smoke             # 1 requisição de teste: confere chave, modelo e schema
+                                     # (--phase propose|classify, --model provedor:modelo)
 poetry run agm rq1 sample            # amostra para a criação dos labels (rq1.sample_size seções)
 poetry run agm rq1 propose           # rótulos livres para cada seção da amostra
 poetry run agm rq1 consolidate       # rascunho do codebook a partir dos rótulos propostos
@@ -500,6 +531,7 @@ poetry run agm rq1 saturation        # amostra nova: quantas seções não cabem
 poetry run agm rq1 validate export   # planilha cega para rotular à mão
 poetry run agm rq1 validate llm      # rótulos do LLM na amostra de validação (--replicate 2)
 poetry run agm rq1 validate score    # concordância humano × LLM e LLM × LLM (--human planilha.csv)
+poetry run agm rq1 compare --model A --model B   # dois classificadores comparados (provedor:modelo)
 ```
 
 ### Criação dos labels
@@ -540,7 +572,10 @@ versão (`propose-v2`, `induce-v1`, `align-v1`, `map-v1`): mudar o texto de um p
    requisição leva até `rq1.chunk_sections` seções de um mesmo arquivo; o `system` traz as
    instruções e o codebook inteiro (igual em todas as requisições) e avisa que o conteúdo das
    seções é dado a classificar, não instrução a seguir. Cada seção recebe uma ou mais categorias,
-   ou `other`. `--limit N` faz um piloto com N requisições. Saídas em
+   ou `other`. `--limit N` faz um piloto com N requisições. `--kind` (repetível) restringe a
+   classificação a tipos de artefato: `--kind INSTRUCTION --kind SKILL_MANIFEST` deixa de fora
+   os arquivos de recurso das Skills, que são documentação de apoio e não instruções ao agente.
+   Rodar depois sem `--kind` reaproveita do cache tudo o que já foi classificado. Saídas em
    `classify/<codebook>/<provedor>/<modelo>/`:
    - `section_labels.parquet`: uma linha por seção e categoria;
    - `artifact_labels.parquet`: por arquivo e categoria, seções, palavras e fração das palavras;
@@ -562,7 +597,38 @@ versão (`propose-v2`, `induce-v1`, `align-v1`, `map-v1`): mudar o texto de um p
      precisão, revocação e F1, com médias e intervalos de confiança de 95% por bootstrap, para
      humano × LLM, LLM × LLM e, com `--retest`, humano × humano (você rotula de novo parte da
      planilha depois de alguns dias). Sem `--human`, mede só a estabilidade. Saídas:
-     `scores.json` e `scores.md`.
+     `scores.json` e `scores.md`, na pasta do modelo (`validation/<codebook>/llm/<provedor>/
+     <modelo>/`), ao lado dos rótulos dele; o score de um modelo nunca apaga o de outro.
+
+### Comparar dois modelos
+
+`classify`, `saturation`, `validate llm` e `validate score` aceitam `--model provedor:modelo`
+(por exemplo `--model gemini:gemini-3.5-flash-lite`), que troca `rq1.provider` e
+`rq1.classify_model` só naquela execução, sem outro `study.yaml`. A troca fica registrada no
+manifesto de cada saída. As respostas e as saídas de cada modelo ficam em pastas separadas.
+
+```bash
+# Modelo A: o do study.yaml; modelo B: outro, de outra família
+poetry run agm rq1 validate llm
+poetry run agm rq1 validate llm --model gemini:gemini-3.5-flash-lite
+poetry run agm rq1 classify
+poetry run agm rq1 classify --model gemini:gemini-3.5-flash-lite
+
+poetry run agm rq1 compare --model anthropic:claude-sonnet-5-5 \
+  --model gemini:gemini-3.5-flash-lite --human planilha.csv
+```
+
+O `compare` usa o que existir para os dois modelos:
+
+- **amostra de validação** (`validate llm --model`): humano × A e humano × B (com `--human`) e
+  A × B, com kappa, precisão, revocação e F1 por categoria e intervalos de confiança;
+- **todas as seções** (`classify --model`): A × B sobre todas as seções (sem bootstrap: com
+  milhares de seções os intervalos seriam mínimos) e as prevalências dos dois lado a lado, por
+  ferramenta, tipo de arquivo e categoria, com a diferença (`prevalence.parquet`). Ela mostra se as
+  conclusões da RQ1 dependem do modelo.
+
+Saídas em `compare/<codebook>/<A>__vs__<B>/`: `compare.json`, `compare.md` e
+`prevalence.parquet`. O A é sempre o primeiro `--model`.
 
 ### Validação externa com o dataset do *Agent READMEs*
 
@@ -586,16 +652,57 @@ cd -
 poetry run agm rq1 agentreadmes import data/sources/agentreadmes/train-00000-of-00001.parquet \
   --human-labels data/sources/agentreadmes/final_am_classification_3.csv \
   --gpt5-labels data/sources/agentreadmes/gpt_5_file_classifications.csv
-# 2. Classifica com o codebook do artigo (qualquer comando agm rq1 aceita --gold)
-poetry run agm rq1 classify --gold data/external/agentreadmes --codebook codebooks/seed_agent_readmes.yaml
+# 2. Classifica com o codebook do artigo (qualquer comando agm rq1 aceita --gold). --only-labelled
+#    classifica só os 325 arquivos rotulados (cerca de 1/7 das seções), que é o que o score usa;
+#    --limit 5 antes faz um piloto para conferir o custo
+poetry run agm rq1 classify --gold data/external/agentreadmes \
+  --codebook codebooks/seed_agent_readmes.yaml --only-labelled --model anthropic:claude-sonnet-5-5
 # 3. Concordância por arquivo: humano × nosso classificador, humano × GPT-5, GPT-5 × nosso
-poetry run agm rq1 agentreadmes score
-poetry run agm rq1 agentreadmes score --tool CLAUDE --tool AGENTS   # só as ferramentas do estudo
+poetry run agm rq1 agentreadmes score --model anthropic:claude-sonnet-5-5
+poetry run agm rq1 agentreadmes score --model anthropic:claude-sonnet-5-5 \
+  --tool CLAUDE --tool AGENTS   # só as ferramentas do estudo
 ```
 
+**Sensibilidade ao codebook.** O `seed_agent_readmes.yaml` tem só as definições de uma linha da
+Tabela 3 do artigo. O `codebooks/agent_readmes_enriched.yaml` mantém as mesmas categorias e
+definições e acrescenta, como critério de inclusão, só textos dos próprios autores: a definição
+operacional do código deles (`labels.py`) e a descrição de cada categoria no artigo, com o exemplo
+que ela traz. Rodar os dois mostra quanto do erro vem das definições. As saídas ficam em pastas
+separadas (`agent_readmes_2025` e `agent_readmes_2025-enriched`).
+
+```bash
+poetry run agm rq1 classify --gold data/external/agentreadmes \
+  --codebook codebooks/agent_readmes_enriched.yaml --only-labelled --model anthropic:claude-sonnet-5-5
+poetry run agm rq1 agentreadmes score --codebook codebooks/agent_readmes_enriched.yaml \
+  --model anthropic:claude-sonnet-5-5
+```
+
+**Por seção × arquivo inteiro.** O artigo (e o GPT-5) rotula cada arquivo de uma vez; o nosso
+classificador rotula cada seção e une as categorias por arquivo. `--unit file` classifica o
+arquivo inteiro numa única requisição, com o mesmo codebook, modelo, effort e proteção contra
+injeção. Assim, cada comparação muda um fator só: Claude por arquivo × GPT-5 (o modelo) e Claude
+por arquivo × Claude por seção (a unidade).
+
+```bash
+poetry run agm rq1 classify --gold data/external/agentreadmes --unit file \
+  --codebook codebooks/seed_agent_readmes.yaml --only-labelled --model anthropic:claude-sonnet-5-5
+poetry run agm rq1 agentreadmes score --unit file --model anthropic:claude-sonnet-5-5
+```
+
+O resultado fica em `classify-file/<codebook>/<provedor>/<modelo>/file_labels.parquet` (uma
+linha por arquivo, com a lista de categorias) e o score em `scores-file.*`. Esse score traz também
+`section_vs_file`, a concordância entre as duas unidades do mesmo modelo, e
+`mean_categories`, a média de categorias por arquivo de cada rotulador. Arquivos idênticos geram
+uma requisição só. Precisa do `file_contents.parquet` da importação: importe de novo com
+`--force` um dataset importado antes dessa versão.
+
 - **O que a importação grava** (`data/external/agentreadmes/`): `rq1_sections.parquet`, com os
-  arquivos quebrados em seções pelo mesmo parser do `analyze`; `files.parquet`, com URL e
-  metadados de cada arquivo; `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos
+  arquivos quebrados em seções pelo mesmo parser do `analyze`; `rq2_structure.parquet`, com as
+  métricas da RQ2 de cada arquivo, nas mesmas colunas e tipos da tabela gold do `analyze` (cada
+  arquivo é um artefato cuja única versão é o seu conteúdo, `head_blob_sha` é o id de blob do
+  git e o `--study` define a configuração de análise); `files.parquet`, com URL e
+  metadados de cada arquivo; `file_contents.parquet`, com o conteúdo de cada arquivo (para
+  `--unit file`); `reference_labels.parquet`, com os rótulos humanos e do GPT-5 já nos
   ids do `seed_agent_readmes.yaml`; e um `analysis_manifest.json` com o SHA-256 de cada fonte. Os
   ids são derivados do conteúdo (URLs e nomes ordenados), então a mesma fonte gera sempre os
   mesmos ids. Um rótulo que não está na tabela de correspondência faz a importação parar.
@@ -603,20 +710,169 @@ poetry run agm rq1 agentreadmes score --tool CLAUDE --tool AGENTS   # só as fer
   arquivo recebe todas as categorias das suas seções (`other` não conta). Essa união tende a
   marcar mais categorias que um humano lendo o arquivo inteiro (mais revocação, menos precisão).
   Um arquivo sem nenhuma seção com texto fica sem categoria.
-- **Arquivos ficam de fora da comparação** quando não estão no dataset (8 dos 332 rotulados) ou
+- **`--only-labelled`** filtra só a classificação; a importação continua com tudo. As requisições
+  são montadas por arquivo, então classificar o dataset inteiro depois reaproveita do cache quase
+  todas as respostas já pagas (só muda a requisição de um arquivo rotulado que tem seção idêntica
+  à de um arquivo não rotulado, que passa a representá-la).
+- **Arquivos ficam de fora da comparação** quando não estão no dataset (7 dos 332 rotulados) ou
   quando a classificação não terminou (`unclassified_files`, por exemplo depois de um
   `classify --limit`). As três comparações usam sempre o mesmo conjunto de arquivos.
 - **O `copilot-instructions.md` é importado** (ferramenta `COPILOT`), porque a validação mede o
-  classificador e independe da ferramenta: tirá-lo deixaria 202 arquivos rotulados em vez de 324 e
+  classificador e independe da ferramenta: tirá-lo deixaria 202 arquivos rotulados em vez de 325 e
   as categorias raras quase sem exemplos. O resultado sai também por ferramenta, e `--tool`
   restringe o score às ferramentas do estudo, para comparar com o nosso corpus.
 - **Conferência da correspondência dos rótulos:** com os 332 arquivos, o `agreement` deste projeto
   aplicado a humano × GPT-5 reproduz o relatório do artigo (precisão micro 0,7326, revocação micro
   0,8632, F1 micro 0,7925 e F1 macro 0,7270).
+- **RQ2 no dataset do artigo:** o `rq2_structure.parquet` da importação permite comparar a
+  estrutura dos nossos arquivos com a dos arquivos do artigo usando o mesmo código. Nada é
+  filtrado: para usar o critério de tamanho da nossa amostra, filtre `size_bytes >=
+  analysis.min_artifact_bytes`. O critério de autores humanos não se aplica, porque o dataset
+  não traz o histórico; pelo mesmo motivo não há RQ3 nele, nem Skills.
 - Saídas em `DATA_DIR/rq1/agentreadmes/agentreadmes/<codebook>/<provedor>/<modelo>/`:
   `scores.json`, `scores.md` e o manifesto (ou `scores-AGENTS-CLAUDE.*` com `--tool`).
 - O dataset e o pacote de replicação não declaram licença: cite o artigo e não redistribua os
   arquivos.
+
+## RQ2: estrutura dos artefatos
+
+`agm rq2 summary` lê só o `rq2_structure.parquet` de uma saída do `analyze` e grava
+`DATA_DIR/rq2/<gold>/rq2_summary.json` e `.md`. Os dados são agrupados por tipo de arquivo
+(`CLAUDE.md`, `AGENTS.md`, `SKILL.md`):
+
+- extensão (linhas, palavras, caracteres) em média e quartis, com faixas de palavras;
+- títulos, seções e profundidade máxima;
+- porcentagem de arquivos com cada elemento (bloco de código, tabela, listas, links...);
+- Flesch, só para os arquivos em inglês;
+- frontmatter das Skills: quantos são YAML válidos e a frequência das chaves.
+
+`--compare` resume outra saída com os mesmos filtros, lado a lado. Por exemplo, os arquivos do
+artigo *Agent READMEs*, onde o `COPILOT` fica de fora e o limite de tamanho é o mesmo
+(`--min-bytes`, padrão `analysis.min_artifact_bytes`):
+
+```bash
+poetry run agm rq2 summary --compare data/external/agentreadmes
+```
+
+Os dois datasets não têm a mesma população, então cada número sai em quatro recortes:
+
+- **todos os arquivos ou só os da raiz**: o artigo só tem arquivos da raiz, e boa parte dos
+  nossos é aninhada;
+- **por arquivo ou um arquivo por repositório**: no segundo, cada repositório conta com o arquivo
+  da raiz ou, sem ele, o de caminho mais raso, para um monorepo com dezenas de arquivos não pesar
+  mais.
+
+A tabela "por faixa de tamanho" mostra se uma diferença (por exemplo, menos blocos de código)
+vem de arquivos menores ou de outro jeito de escrever. `code_blocks` conta blocos cercados e
+indentados.
+
+## Auditoria da amostra (vieses de coleta)
+
+`agm audit` lê só um export bronze (como o `analyze`, sem banco) e mostra onde a descoberta, a
+seleção e a mineração podem ter enviesado a amostra. Ele grava
+`DATA_DIR/audit/<export>/audit.json` e `audit.md`. Rode de novo depois de cada `agm export`:
+
+```bash
+poetry run agm export && poetry run agm audit
+```
+
+O relatório tem quatro partes e uma lista de avisos (`warnings`) em linguagem direta:
+
+- **descoberta**: para cada query do `study.yaml`, se ela foi buscada, qual faixa de tamanho foi
+  coletada, que fração da população estimada pela API essa faixa cobre, quantas fatias passaram
+  do limite de 1000 resultados e quantos resultados ficaram inacessíveis. Também mostra o que veio
+  de fora do protocolo atual (outra faixa de tamanho ou query) e quantos repositórios mantidos só
+  foram achados assim;
+- **seleção**: o funil (primeiro critério que falhou) e, para cada critério, quantos
+  repositórios falham nele e quantos falham **só** nele (entrariam na amostra sem ele). Mostra
+  também os repositórios mais populares rejeitados só pela licença, as estrelas e o ano de criação
+  dos mantidos, e os status gravados que a configuração atual não confirma (sinal para rodar
+  `agm select --reevaluate`);
+- **mineração**: falhas por tipo de erro, conteúdos omitidos, o período da mineração e quantos
+  repositórios foram minerados depois da `reference_date`;
+- **corte do histórico**: o que o corte na `reference_date` remove (commits, mudanças, artefatos
+  que ainda não existiam ou estavam em outro estado, autores que ainda não tinham commitado),
+  quantos repositórios foram minerados antes do fim da data e podem não ter alguns dias de
+  histórico, os artefatos sem mudança registrada e os arquivos elegíveis no HEAD comparados aos
+  elegíveis na data de corte. Os números aparecem mesmo com o corte desligado, mostrando o que
+  ele removeria;
+- **artefatos** (no HEAD dos repositórios minerados, antes do filtro de contribuidores humanos):
+  por tipo de arquivo, symlinks, arquivos abaixo de `min_artifact_bytes`, arquivos elegíveis
+  maiores que a faixa coletada da query daquele tipo, e repositórios cujos arquivos de um tipo só
+  chegaram pela query de outro tipo. Mostra ainda a concentração (fração dos arquivos nos 1%
+  repositórios com mais arquivos) e as duplicatas (blobs idênticos).
+
+O critério de tamanho segue o da amostra (`analysis.min_artifact_bytes`, sem symlinks). A
+configuração usada é a do `--study` (padrão `STUDY_CONFIG_PATH`), e o relatório avisa quando ela
+difere da que foi gravada no export.
+
+### Para o artigo (LaTeX)
+
+A auditoria também grava dois arquivos LaTeX, em português e no formato do template da SBC
+(tabelas só com `tabular` e `\hline`, números como `5.380` e `9,5\%`):
+
+- `audit.tex`: uma macro por número (`\auditKept`, `\auditCoverageClaude`,
+  `\auditOnlyLicense`, `\auditTopOnePctShare`...) e uma macro por tabela
+  (`\auditTableDiscovery`, `\auditTableSelection`, `\auditTableArtifacts`, com os rótulos
+  `tab:audit-*`). Não edite esse arquivo: rode a auditoria de novo;
+- `audit_rascunho.tex`: rascunho dos parágrafos de descoberta, seleção, mineração e ameaças à
+  validade, escrito com as macros. As primeiras linhas listam, como comentários, os avisos da
+  auditoria. Copie o texto para o artigo e edite lá.
+
+No artigo, carregue as macros uma vez no preâmbulo e use as tabelas onde quiser:
+
+```latex
+\input{audit}            % preâmbulo
+...
+\auditTableSelection     % no texto
+Dos \auditEvaluated{} repositórios avaliados, \auditKept{} foram mantidos.
+```
+
+Depois de uma nova coleta (`agm export && agm audit`), basta trocar o `audit.tex` no Overleaf
+para todos os números do texto e das tabelas se atualizarem. O comentário no topo do arquivo
+registra o export, o `code_version` e o hash do `study.yaml` de onde os números vieram.
+
+## Figuras do artigo (LaTeX)
+
+`agm figures` gera as figuras do artigo em LaTeX puro (TikZ e pgfplots), porque a sincronização
+com o Overleaf só leva arquivos de texto. Ele lê apenas saídas de outros comandos (sem banco) e
+grava `DATA_DIR/figures/<gold>/figuras.tex`, com uma macro por figura, cada uma com o ambiente
+`figure` completo, legenda e rótulo:
+
+- `\figPipeline` (`fig:pipeline`): fluxograma das etapas, com os repositórios descobertos,
+  avaliados, selecionados e minerados (do `audit.json` do mesmo export) e os arquivos e
+  repositórios analisados (do `rq2_structure`, com os filtros do `agm rq2 summary`);
+- `\figElementos` (`fig:elementos`): porcentagem dos `CLAUDE.md` e `AGENTS.md` com tabelas,
+  blocos de código, listas numeradas, listas com marcadores e links, na nossa amostra e nos
+  arquivos do *Agent READMEs* (o `rq2_structure` do `--compare`, padrão
+  `DATA_DIR/external/agentreadmes`);
+- `\figPrevalencia` (`fig:prevalencia`): mapa de calor com a porcentagem de arquivos com cada
+  categoria da QP1, nas colunas Todos, Raiz (o arquivo da raiz de cada repositório, escolhido
+  por `one_per_repository`) e AR (os arquivos rotulados do *Agent READMEs*, classificados pelo
+  mesmo modelo). Usa o `artifact_labels.parquet` do `classify` da nossa amostra e o
+  `section_labels.parquet` do `classify` do *Agent READMEs*.
+
+As pastas do `classify` saem do `--model` e do `--codebook` (como nos comandos da RQ1), ou de
+`--labels` e `--compare-labels`:
+
+```bash
+poetry run agm figures --model anthropic:claude-sonnet-5-5 \
+  --codebook codebooks/seed_agent_readmes.yaml
+```
+
+Cada porcentagem é arredondada uma única vez, a partir das contagens exatas (2031/7977 =
+25,46% vira 25, e não 26 como no arredondamento de 0,255). Os números seguem o formato
+brasileiro (`5.037`). As figuras usam só tons de cinza, como pede a SBC, e cabem nos 15 cm de
+texto do template. O comentário no topo do arquivo registra as entradas e diz o que o preâmbulo
+precisa:
+
+```latex
+\usepackage{pgfplots}       % carrega o TikZ
+\pgfplotsset{compat=1.18}
+\input{figuras}
+...
+\figPipeline                % no texto, onde a figura deve ficar
+```
 
 ## Testes
 
@@ -648,6 +904,10 @@ instala o pacote no ambiente da outra pasta.
   ou repita a seleção com `created_before: 2024-01-01`.
 - A linguagem principal vem do GitHub Linguist, que não conta Markdown. Um repositório de
   documentação com um script pequeno ainda passa.
-- A legibilidade (Flesch) só é calculada para textos em inglês.
+- A legibilidade (Flesch) só é calculada para textos em inglês, e só sobre parágrafos e itens de
+  lista (títulos, tabelas e código ficam de fora). Cada bloco conta como uma frase, mesmo sem
+  ponto final, porque os arquivos de configuração são escritos quase sempre em listas. Blocos de
+  1 ou 2 palavras (rótulos, links) ficam de fora. Blocos feitos só de caminhos ou URLs ainda
+  distorcem o índice.
 
 Mais detalhes técnicos estão em [AGENTS.md](AGENTS.md).

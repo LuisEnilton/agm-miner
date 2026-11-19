@@ -9,11 +9,13 @@ from sqlalchemy import select
 from agm_miner.config import SelectionConfig, StudyConfig
 from agm_miner.database.models import DiscoveryHit, Repository, RepositoryStatus
 from agm_miner.stages.selection import (
+    CRITERIA,
     MANUAL_QUERY,
     RepositoryMetadata,
     SelectionError,
     add_repositories,
     evaluate,
+    failed_criteria,
     fetch_metadata,
     funnel,
     select_repositories,
@@ -126,6 +128,29 @@ def test_metadata_parsing() -> None:
 )
 def test_evaluate(overrides: dict[str, Any], reason: str | None) -> None:
     assert evaluate(metadata(**overrides), SelectionConfig(), REFERENCE) == reason
+
+
+def test_failed_criteria_lists_every_failure_in_order() -> None:
+    repository = metadata(
+        isFork=True,
+        stargazerCount=1,
+        licenseInfo=None,
+        description="An awesome tutorial list",
+    )
+    failed = failed_criteria(repository, SelectionConfig(), REFERENCE)
+    # One keyword at most, in the order of exclude_keywords.
+    assert failed == ["fork", "license", "min_stars", "keyword:awesome"]
+    assert evaluate(repository, SelectionConfig(), REFERENCE) == "fork"
+    assert failed_criteria(metadata(), SelectionConfig(), REFERENCE) == []
+    assert {reason.split(":")[0] for reason in failed} <= set(CRITERIA)
+
+
+def test_metadata_round_trips_through_the_stored_columns() -> None:
+    original = metadata()
+    row = original.as_columns() | {"id": original.database_id, "node_id": original.node_id}
+    assert RepositoryMetadata.from_columns(row) == original
+    empty = RepositoryMetadata.from_columns(row | {"default_branch": None})
+    assert evaluate(empty, SelectionConfig(), REFERENCE) == "empty"
 
 
 def test_activity_criterion_can_be_disabled() -> None:

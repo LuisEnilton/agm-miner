@@ -5,8 +5,9 @@ The paper released 2,303 context files (``hao-li/AgentREADMEs`` on Hugging Face:
 (``woraamy/Agent-Context-File-Analysis``), the labels its authors gave 332 of them by hand with
 their 16-label taxonomy, plus the labels GPT-5 gave the same files.
 
-``import_agentreadmes`` turns the dataset into an analysis-like output (``rq1_sections`` and an
-``analysis_manifest.json``), so every ``agm rq1`` command runs on it with ``--gold``. The
+``import_agentreadmes`` turns the dataset into an analysis-like output (``rq1_sections``,
+``rq2_structure`` and an ``analysis_manifest.json``), so every ``agm rq1`` command runs on it with
+``--gold`` and the RQ2 metrics of our sample can be compared with the paper's files. The
 reference labels are mapped onto ``codebooks/seed_agent_readmes.yaml``. ``score_agentreadmes``
 then compares, file by file, our classification (with that codebook) with the human labels, next
 to GPT-5 as the paper's baseline.
@@ -21,25 +22,39 @@ import ast
 import hashlib
 import json
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
-from agm_miner.analysis.datasets import ANALYSIS_MANIFEST, SECTIONS_SCHEMA, document_section_rows
+from agm_miner.analysis.datasets import (
+    ANALYSIS_MANIFEST,
+    METRICS_SCHEMA,
+    SECTIONS_SCHEMA,
+    build_rq2_structure,
+    document_section_rows,
+)
 from agm_miner.analysis.markdown import parse_document
-from agm_miner.config import Rq1Config
+from agm_miner.analysis.metrics import compute_metrics
+from agm_miner.config import AnalysisConfig, Rq1Config
 from agm_miner.rq1.agreement import agreement
 from agm_miner.rq1.codebook import OTHER, load_codebook
-from agm_miner.rq1.stages import _codebook_slug, _write_manifest, model_slug
+from agm_miner.rq1.stages import (
+    FILE_LABELS,
+    _codebook_slug,
+    _write_manifest,
+    file_labels_dir,
+    model_slug,
+)
 from agm_miner.rq1.store import run_lock
-from agm_miner.rq1.units import RQ1_SECTIONS, build_units, load_units
+from agm_miner.rq1.units import FILE_CONTENTS, RQ1_SECTIONS, build_units, load_units
 from agm_miner.runs import code_version
 
 FILES = "files.parquet"
 REFERENCE_LABELS = "reference_labels.parquet"
+RQ2_STRUCTURE = "rq2_structure.parquet"
 HUMAN, GPT5 = "human", "gpt-5"
 
 # The dataset's `agent` column -> our tool names (COPILOT is not mined by this study).
@@ -136,7 +151,8 @@ def build_files(dataset: pl.DataFrame) -> pl.DataFrame:
 
     files = (
         dataset.with_columns(
-            (pl.col("repository_owner") + "/" + pl.col("repository_name")).alias("full_name")
+            (pl.col("repository_owner") + "/" + pl.col("repository_name")).alias("full_name"),
+            pl.col("file_url").str.strip_chars(),
         )
         .sort("file_url")
         .with_row_index("artifact_id", offset=1)
@@ -160,8 +176,16 @@ def build_sections(files: pl.DataFrame) -> pl.DataFrame:
             )
         )
     sections = pl.DataFrame(rows, schema=SECTIONS_SCHEMA)
-    attributes = files.select(
+    return sections.join(
+        _attributes(files).select(pl.exclude("repo_id")), on="artifact_id", how="inner"
+    ).sort("repo_id", "artifact_id", "position")
+
+
+def _attributes(files: pl.DataFrame) -> pl.DataFrame:
+    """Artifact attributes of every file, as ``agm analyze`` gives them to mined artifacts."""
+    return files.select(
         pl.col("artifact_id"),
+        "repo_id",
         "full_name",
         "path",
         "tool",
@@ -172,9 +196,56 @@ def build_sections(files: pl.DataFrame) -> pl.DataFrame:
         .alias("scope"),
         pl.lit(None, dtype=pl.Utf8).alias("skill_name"),
     )
-    return sections.join(attributes, on="artifact_id", how="inner").sort(
-        "repo_id", "artifact_id", "position"
+
+
+def git_blob_sha(content: str) -> str:
+    """The id git gives this content as a blob (``git hash-object``)."""
+    data = content.encode("utf-8")
+    return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+
+
+def build_structure(files: pl.DataFrame, config: AnalysisConfig) -> pl.DataFrame:
+    """``rq2_structure`` of every file, built by the same function and metrics as the one
+    ``agm analyze`` writes for the mined artifacts at HEAD (same columns and types). Each file is
+    an artifact whose only version is its content (``version_id`` = ``artifact_id``). Nothing is
+    filtered: the study sample's ``min_artifact_bytes`` can be applied on ``size_bytes``."""
+    contents = files["content"].fill_null("").to_list()
+    attributes = _attributes(files).with_columns(
+        pl.Series("head_blob_sha", [git_blob_sha(content) for content in contents]),
+        pl.Series("size_bytes", [len(content.encode("utf-8")) for content in contents]),
     )
+    tables = {
+        "artifacts": attributes.select(
+            pl.col("artifact_id").alias("id"),
+            "repo_id",
+            "path",
+            "tool",
+            "kind",
+            "scope",
+            "skill_name",
+            pl.lit(True).alias("exists_at_head"),
+            "head_blob_sha",
+        ),
+        "artifact_versions": attributes.select(
+            pl.col("artifact_id").alias("id"),
+            "artifact_id",
+            pl.col("head_blob_sha").alias("blob_sha"),
+            pl.lit(False).alias("is_symlink"),
+            pl.col("size_bytes").cast(pl.Int64),
+            pl.lit(None, dtype=pl.Utf8).alias("content_omitted"),
+        ),
+        "repositories": attributes.select(pl.col("repo_id").alias("id"), "full_name").unique(),
+    }
+    rows = []
+    for file, content in zip(files.iter_rows(named=True), contents, strict=True):
+        metrics, _ = compute_metrics(content, config.min_chars_for_language)
+        ids = {
+            "version_id": file["artifact_id"],
+            "artifact_id": file["artifact_id"],
+            "repo_id": file["repo_id"],
+        }
+        rows.append(ids | metrics.as_row())
+    return build_rq2_structure(tables, pl.DataFrame(rows, schema=METRICS_SCHEMA))
 
 
 def _map_labels(values: Sequence[str], mapping: Mapping[str, str], source: str) -> list[str]:
@@ -193,7 +264,9 @@ def parse_human_labels(frame: pl.DataFrame) -> dict[str, tuple[str, list[str]]]:
     labels: dict[str, tuple[str, list[str]]] = {}
     for row in frame.iter_rows(named=True):
         values = [str(row[c]).strip() for c in columns if row[c] and str(row[c]).strip()]
-        labels[str(row["#"])] = (row["file_url"], _map_labels(values, HUMAN_LABELS, "human"))
+        # URLs are matched with the dataset's; one in the published CSV has a leading space.
+        url = (row["file_url"] or "").strip()
+        labels[str(row["#"])] = (url, _map_labels(values, HUMAN_LABELS, "human"))
     return labels
 
 
@@ -264,10 +337,13 @@ def import_agentreadmes(
     human_path: Path | None = None,
     gpt5_path: Path | None = None,
     force: bool = False,
+    analysis: AnalysisConfig | None = None,
 ) -> dict[str, Any]:
-    """Write ``output_dir`` (``rq1_sections``, ``files``, ``reference_labels`` and the
-    manifest) from the dataset Parquet and, optionally, the paper's label CSVs. Written into a
-    ``.partial`` folder and renamed at the end, like ``agm analyze``."""
+    """Write ``output_dir`` (``rq1_sections``, ``rq2_structure``, ``files``,
+    ``reference_labels`` and the manifest) from the dataset Parquet and, optionally, the paper's
+    label CSVs. Written into a ``.partial`` folder and renamed at the end, like ``agm analyze``.
+    ``analysis`` is the study's analysis configuration (the RQ2 metrics depend on it)."""
+    analysis = analysis or AnalysisConfig()
     if gpt5_path is not None and human_path is None:
         raise AgentReadmesError("the GPT-5 labels are matched through the human labels' row ids")
     if output_dir.exists() and not force:
@@ -275,6 +351,12 @@ def import_agentreadmes(
 
     files = build_files(pl.read_parquet(dataset_path))
     sections = build_sections(files)
+    structure = build_structure(files, analysis)
+    contents = (
+        _attributes(files)
+        .select("artifact_id", "repo_id", "full_name", "path", "tool", "kind")
+        .with_columns(files["content"].fill_null(""))
+    )
     with_text = build_units(sections)
     files = files.join(
         with_text.group_by("artifact_id").agg(pl.len().cast(pl.Int64).alias("sections")),
@@ -289,7 +371,12 @@ def import_agentreadmes(
             files = files.with_columns(pl.lit(None, dtype=dtype).alias(column))
     files = files.select([pl.col(c).cast(t) for c, t in _FILES_SCHEMA.items()])
 
-    outputs: dict[str, pl.DataFrame] = {RQ1_SECTIONS: sections, FILES: files}
+    outputs: dict[str, pl.DataFrame] = {
+        RQ1_SECTIONS: sections,
+        RQ2_STRUCTURE: structure,
+        FILES: files,
+        FILE_CONTENTS: contents,
+    }
     inputs = {"dataset": dataset_path}
     reference_summary: dict[str, Any] = {}
     if human_path is not None:
@@ -332,6 +419,7 @@ def import_agentreadmes(
         "inputs": {
             name: {"path": str(path), "sha256": _sha256(path)} for name, path in inputs.items()
         },
+        "analysis_config": analysis.model_dump(mode="json"),
         "outputs": {name.removesuffix(".parquet"): frame.height for name, frame in outputs.items()},
         **summary,
     }
@@ -342,6 +430,21 @@ def import_agentreadmes(
 
 
 # --------------------------------------------------------------------------- score
+
+
+def labelled_artifact_ids(gold_dir: Path) -> list[int]:
+    """Files of an imported dataset that have human reference labels (``agm rq1 classify
+    --only-labelled`` classifies just these, which is all the score needs)."""
+    path = gold_dir / REFERENCE_LABELS
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No {REFERENCE_LABELS} in {gold_dir}: --only-labelled needs a dataset imported "
+            "with its reference labels (agm rq1 agentreadmes import --human-labels)"
+        )
+    reference = pl.read_parquet(path).filter(
+        (pl.col("rater") == HUMAN) & pl.col("artifact_id").is_not_null()
+    )
+    return sorted(reference["artifact_id"].unique().to_list())
 
 
 def predicted_file_labels(section_labels: pl.DataFrame) -> dict[int, frozenset[str]]:
@@ -371,6 +474,7 @@ def _comparisons(
     gpt5: Mapping[int, frozenset[str]],
     files: Sequence[int],
     categories: Sequence[str],
+    by_section: Mapping[int, frozenset[str]] | None = None,
 ) -> dict[str, Any]:
     def restrict(labels: Mapping[int, frozenset[str]]) -> dict[int, frozenset[str]]:
         return {key: labels[key] for key in files if key in labels}
@@ -379,7 +483,58 @@ def _comparisons(
     if gpt5:
         result["human_vs_gpt5"] = agreement(restrict(human), restrict(gpt5), categories)
         result["gpt5_vs_llm"] = agreement(restrict(gpt5), restrict(llm), categories)
+    if by_section and restrict(by_section):
+        both = [key for key in files if key in by_section]
+        result["section_vs_file"] = agreement(
+            {k: by_section[k] for k in both}, {k: llm[k] for k in both}, categories
+        )
     return result
+
+
+UNITS = ("section", "file")
+
+
+def _section_predictions(
+    gold_dir: Path, classified_dir: Path, labelled: Collection[int]
+) -> tuple[dict[int, frozenset[str]], list[int]] | None:
+    """Labels of the ``labelled`` files from the section classification (the union of their
+    sections' categories), and the files left out because some section is not classified.
+    None when there is no section classification in ``classified_dir``."""
+    path = classified_dir / "section_labels.parquet"
+    if not path.exists():
+        return None
+    section_labels = pl.read_parquet(path)
+    sections_of = load_units(gold_dir).group_by("artifact_id").agg(pl.col("section_key").unique())
+    predicted = predicted_file_labels(section_labels)
+    labelled_keys = set(section_labels["section_key"].unique().to_list())
+    incomplete = {
+        artifact for artifact, keys in sections_of.iter_rows() if set(keys) - labelled_keys
+    }
+    llm: dict[int, frozenset[str]] = {}
+    unclassified: list[int] = []
+    for artifact in sorted(labelled):
+        if artifact in incomplete:
+            unclassified.append(artifact)
+        else:  # a file without text has no section, hence no category
+            llm[artifact] = predicted.get(artifact, frozenset())
+    return llm, unclassified
+
+
+def _file_predictions(
+    classified_dir: Path, labelled: Collection[int]
+) -> tuple[dict[int, frozenset[str]], list[int]] | None:
+    """Labels of the ``labelled`` files from the whole-file classification."""
+    path = classified_dir / FILE_LABELS
+    if not path.exists():
+        return None
+    answered = {
+        artifact: frozenset(categories) - {OTHER}
+        for artifact, categories in pl.read_parquet(path)
+        .select("artifact_id", "categories")
+        .iter_rows()
+    }
+    llm = {a: answered[a] for a in sorted(labelled) if a in answered}
+    return llm, [a for a in sorted(labelled) if a not in answered]
 
 
 def score_agentreadmes(
@@ -391,15 +546,23 @@ def score_agentreadmes(
     provider: str,
     model: str,
     tools: Sequence[str] | None = None,
+    unit: str = "section",
 ) -> dict[str, Any]:
     """File-level agreement of our classification (``agm rq1 classify`` with the seed
     codebook) with the human labels, next to GPT-5's, overall and per tool.
 
-    The files are the human-labelled files of the dataset (``tools`` only, when given) whose
-    sections were all classified. A file without any section with text gets no category: that
-    is our method's answer for it. Files whose classification is incomplete are left out and
-    counted in ``unclassified_files``.
+    ``unit`` says which classification is scored: ``section`` (a file has every category of its
+    sections) or ``file`` (``classify --unit file``, one answer per whole file, the paper's
+    strategy). With ``file``, the section classification of the same model, when it exists, is
+    compared with it as well (``section_vs_file``): only the unit differs between the two.
+
+    The files are the human-labelled files of the dataset (``tools`` only, when given) that were
+    classified completely. A file without any section with text gets no category: that is our
+    method's answer for it. Files whose classification is incomplete are left out and counted in
+    ``unclassified_files``.
     """
+    if unit not in UNITS:
+        raise AgentReadmesError(f"unknown unit {unit!r}; use {' or '.join(UNITS)}")
     with run_lock(output_dir):
         codebook = load_codebook(codebook_path)
         reference_path = gold_dir / REFERENCE_LABELS
@@ -415,14 +578,9 @@ def score_agentreadmes(
                 f"the codebook {codebook.label} has no category {foreign}: score with "
                 "codebooks/seed_agent_readmes.yaml (the codebook of the reference labels)"
             )
-        classified_dir = output_dir / "classify" / _codebook_slug(codebook) / provider
-        classified_dir = classified_dir / model_slug(model)
-        if not (classified_dir / "section_labels.parquet").exists():
-            raise FileNotFoundError(
-                f"No classification in {classified_dir}: run `agm rq1 classify --gold "
-                f"{gold_dir} --codebook {codebook_path}` first"
-            )
-        section_labels = pl.read_parquet(classified_dir / "section_labels.parquet")
+        sections_dir = output_dir / "classify" / _codebook_slug(codebook) / provider
+        sections_dir = sections_dir / model_slug(model)
+        files_dir = file_labels_dir(output_dir, codebook, provider, model)
         files = pl.read_parquet(gold_dir / FILES).select("artifact_id", "tool")
         if tools:
             unknown = sorted(set(tools) - set(TOOLS.values()))
@@ -432,38 +590,48 @@ def score_agentreadmes(
         tool_of = dict(files.iter_rows())
 
         human, gpt5 = _rater(reference, HUMAN), _rater(reference, GPT5)
-        units = load_units(gold_dir)
-        sections_of = units.group_by("artifact_id").agg(pl.col("section_key").unique())
-        with_text = {artifact for artifact, _ in sections_of.iter_rows()}
-        predicted = predicted_file_labels(section_labels)
-        labelled_keys = set(section_labels["section_key"].unique().to_list())
-        incomplete = {
-            artifact for artifact, keys in sections_of.iter_rows() if set(keys) - labelled_keys
-        }
-        llm: dict[int, frozenset[str]] = {}
-        unclassified: list[int] = []
-        for artifact in sorted(set(human) & set(tool_of)):
-            if artifact in incomplete:
-                unclassified.append(artifact)
-            else:  # a file without text has no section, hence no category
-                llm[artifact] = predicted.get(artifact, frozenset())
+        labelled = set(human) & set(tool_of)
+        with_text = set(load_units(gold_dir)["artifact_id"].unique().to_list())
+        by_section = _section_predictions(gold_dir, sections_dir, labelled)
+        if unit == "section":
+            predictions, command = by_section, ""
+        else:
+            predictions, command = _file_predictions(files_dir, labelled), " --unit file"
+        if predictions is None:
+            raise FileNotFoundError(
+                f"No classification in {sections_dir if unit == 'section' else files_dir}: run "
+                f"`agm rq1 classify{command} --gold {gold_dir} --codebook {codebook_path}` first"
+            )
+        llm, unclassified = predictions
         scored = sorted(llm)
         if not scored:
             raise AgentReadmesError("no labelled file is classified yet")
+        sections = by_section[0] if unit == "file" and by_section else None
 
         categories = codebook.ids
         scores: dict[str, Any] = {
             "codebook": codebook.label,
             "provider": provider,
             "model": model,
+            "unit": unit,
             "tools": sorted(tools) if tools else sorted(set(tool_of.values())),
             "files": len(scored),
             "files_without_text": sum(1 for a in scored if a not in with_text),
             "unclassified_files": len(unclassified),
-            **_comparisons(human, llm, gpt5, scored, categories),
+            "mean_categories": {
+                name: round(sum(len(labels[a]) for a in scored) / len(scored), 3)
+                for name, labels in (("human", human), ("llm", llm), ("gpt5", gpt5))
+                if all(a in labels for a in scored)
+            },
+            **_comparisons(human, llm, gpt5, scored, categories, sections),
             "by_tool": {
                 tool: _comparisons(
-                    human, llm, gpt5, [a for a in scored if tool_of[a] == tool], categories
+                    human,
+                    llm,
+                    gpt5,
+                    [a for a in scored if tool_of[a] == tool],
+                    categories,
+                    sections,
                 )
                 for tool in sorted({tool_of[a] for a in scored})
             },
@@ -471,7 +639,9 @@ def score_agentreadmes(
         destination = output_dir / "agentreadmes" / _codebook_slug(codebook) / provider
         destination = destination / model_slug(model)
         destination.mkdir(parents=True, exist_ok=True)
-        stem = "scores" if not tools else "scores-" + "-".join(sorted(tools))
+        stem = "scores" if unit == "section" else "scores-file"
+        if tools:
+            stem += "-" + "-".join(sorted(tools))
         (destination / f"{stem}.json").write_text(json.dumps(scores, indent=2), encoding="utf-8")
         (destination / f"{stem}.md").write_text(scores_markdown(scores), encoding="utf-8")
         summary = _summary(scores)
@@ -483,6 +653,7 @@ _TITLES = {
     "human_vs_llm": "Human × our classifier",
     "human_vs_gpt5": "Human × GPT-5 (paper's baseline)",
     "gpt5_vs_llm": "GPT-5 × our classifier",
+    "section_vs_file": "Same model: by section × whole file",
 }
 _HEADLINE = ("sections", "macro_kappa", "macro_kappa_ci95", "macro_f1", "micro_f1")
 
@@ -491,7 +662,8 @@ def _summary(scores: Mapping[str, Any]) -> dict[str, Any]:
     def headline(result: Mapping[str, Any]) -> dict[str, Any]:
         return {("files" if k == "sections" else k): result[k] for k in _HEADLINE}
 
-    summary = {k: scores[k] for k in ("tools", "files", "files_without_text", "unclassified_files")}
+    keys = ("unit", "tools", "files", "files_without_text", "unclassified_files", "mean_categories")
+    summary = {k: scores[k] for k in keys}
     for comparison in _TITLES:
         if comparison in scores:
             summary[comparison] = headline(scores[comparison])
@@ -508,11 +680,15 @@ def scores_markdown(scores: Mapping[str, Any]) -> str:
 
     lines = [
         f"# Agent READMEs: file-level agreement ({scores['codebook']}, "
-        f"{scores['provider']} {scores['model']})",
+        f"{scores['provider']} {scores['model']}, classified by {scores['unit']})",
         "",
         f"Tools: {', '.join(scores['tools'])}. {scores['files']} human-labelled files "
         f"({scores['files_without_text']} without text); {scores['unclassified_files']} left "
         "out (classification incomplete).",
+        "",
+        "Mean categories per file: "
+        + ", ".join(f"{name} {value:.2f}" for name, value in scores["mean_categories"].items())
+        + ".",
         "",
     ]
     for comparison, title in _TITLES.items():

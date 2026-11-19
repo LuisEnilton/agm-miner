@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 
 import pytest
+import textstat
 
 from agm_miner.analysis.markdown import count_words, parse_document, split_frontmatter
 from agm_miner.analysis.metrics import compute_metrics
-from agm_miner.analysis.structure_diff import diff_documents
+from agm_miner.analysis.structure_diff import diff_documents, outline
 
 CLAUDE_MD = """Intro line before any heading.
 
@@ -95,6 +96,83 @@ def test_element_counts_and_prose() -> None:
     assert "Overview paragraph" in document.prose
 
 
+def test_tight_list_items_are_not_paragraphs() -> None:
+    tight = parse_document("# T\n\n- a\n- b\n- c\n\nA paragraph.\n").counts
+    assert tight.paragraphs == 1 and tight.list_items == 3
+    # Items of a loose list (separated by blank lines) hold real paragraphs.
+    loose = parse_document("- a\n\n- b\n").counts
+    assert loose.paragraphs == 2 and loose.list_items == 2
+
+
+def test_task_items_only_in_lists() -> None:
+    assert parse_document("[ ] not a task, just a paragraph\n").counts.task_items == 0
+    assert parse_document("1. [x] done\n2. [ ] todo\n3. plain\n").counts.task_items == 2
+
+
+def test_bare_urls_are_links() -> None:
+    counts = parse_document("See https://example.com and [docs](docs/a.md).\n").counts
+    assert counts.links == 2
+
+
+def test_readability_text_treats_each_block_as_a_sentence() -> None:
+    document = parse_document(
+        "# Commands\n\n"
+        "Intro paragraph that already ends.\n\n"
+        "- Run the tests\n"
+        "- Ask first (see below.)\n\n"
+        "| Head cell | Other |\n|---|---|\n| body cell | x |\n"
+    )
+    assert document.readability_text.split("\n") == [
+        "Intro paragraph that already ends.",
+        "Run the tests.",
+        "Ask first (see below.)",
+    ]
+    # Headings and table cells are still prose (words, language), just not sentences.
+    assert "Commands" in document.prose and "body cell" in document.prose
+
+
+def test_readability_text_matches_textstat_sentences() -> None:
+    document = parse_document(
+        "Run the following commands:\n\n"
+        "- install all the dependencies;\n"
+        "- [Concepts](docs/concepts.md)\n"
+        "- Architecture\n"
+        "- run the whole test suite\n"
+    )
+    # textstat only splits on .!? and ignores sentences of one or two words.
+    assert document.readability_text.split("\n") == [
+        "Run the following commands.",
+        "install all the dependencies.",
+        "run the whole test suite.",
+    ]
+    assert textstat.sentence_count(document.readability_text) == 3
+
+
+def test_readability_of_bullet_only_document() -> None:
+    bullets = [
+        "Run the unit tests with the test command",
+        "Build the package before publishing it",
+        "Keep the public API stable across minor releases",
+        "Prefer small focused pull requests",
+        "Use strict typing in every module",
+        "Avoid default exports in modules",
+        "Document every public function",
+    ]
+    text = "# Package guide\n\n## Rules\n\n" + "".join(f"- {item}\n" for item in bullets)
+    metrics, _ = compute_metrics(text)
+    assert metrics.language == "en"
+    # Joined without punctuation, these bullets used to be a single sentence (grade > 20).
+    assert metrics.flesch_kincaid_grade is not None and metrics.flesch_kincaid_grade < 12
+    assert metrics.flesch_reading_ease is not None and metrics.flesch_reading_ease > 40
+
+
+def test_document_without_sentences_has_no_readability() -> None:
+    headings = "".join(f"## Section about the build number {i}\n" for i in range(12))
+    metrics, document = compute_metrics(headings)
+    assert document.readability_text == ""
+    assert metrics.flesch_reading_ease is None and metrics.flesch_kincaid_grade is None
+
+
 def test_frontmatter_parsing() -> None:
     document = parse_document(SKILL_MD)
     assert document.has_frontmatter
@@ -124,6 +202,15 @@ def test_frontmatter_edge_cases(text: str, has: bool, error: str | None) -> None
         assert document.frontmatter_error is None
     else:
         assert error in document.frontmatter_error
+
+
+def test_frontmatter_after_byte_order_mark() -> None:
+    text = "\ufeff---\nname: x\n---\n# H\n"
+    document = parse_document(text)
+    assert document.has_frontmatter and document.frontmatter == {"name": "x"}
+    assert document.headings[0].line == 3
+    metrics, _ = compute_metrics(text)
+    assert metrics.chars == len(text)
 
 
 def test_split_frontmatter_offsets() -> None:
@@ -189,3 +276,14 @@ def test_repeated_headings_are_disambiguated() -> None:
     before = parse_document("## Notes\na\n\n## Notes\nb\n")
     after = parse_document("## Notes\na\n")
     assert diff_documents(before, after).sections_removed == ["Notes #2"]
+
+
+def test_outlines_diff_like_the_documents_they_summarize() -> None:
+    before = parse_document(
+        "---\nname: a\n---\n# A\n\n## Setup\nold\n\n## Notes\nx\n\n## Notes\ny\n"
+    )
+    after = parse_document("---\nname: b\nmodel: m\n---\n# A\n\n## Setup\nnew\n\n## Notes\nx\n")
+    assert diff_documents(outline(before), outline(after)) == diff_documents(before, after)
+    assert diff_documents(None, outline(after)) == diff_documents(None, after)
+    # The outline keeps digests, never the section text.
+    assert all(isinstance(digest, bytes) for _, digest in outline(before).sections)

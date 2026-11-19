@@ -39,6 +39,9 @@ analysis:
   # 2 KiB in repositories with at least 2 human authors.
   min_artifact_bytes: 2048
   min_human_contributors: 2
+  # Repositories are mined over weeks; the analysis drops every commit after the end of
+  # selection.reference_date, so all of them are seen at that same instant.
+  truncate_at_reference_date: true
 
 rq1:
   # Label-creation sample (agm rq1 sample): stratified by tool x artifact kind x length
@@ -47,24 +50,27 @@ rq1:
   per_repo_cap: 5
   length_bins: [50, 150]
   seed: 20261022
-  # TESTING PHASE: the pipeline runs on the free tier of the Gemini API (gemini-3.5-flash-lite).
-  # Its limits per minute and per day are shown in https://aistudio.google.com/rate-limit and the
-  # daily ones reset at midnight Pacific time; answers are cached, so a run stopped by the daily
-  # limit continues later. Alternative (also free): provider openrouter with a model from
-  # `agm rq1 models --provider openrouter`, e.g. nvidia/nemotron-3.5-super-vl:free.
+  # FINAL COLLECTION (2026-11): the sample was classified with provider anthropic, the
+  # Claude Sonnet 5.5 model at effort low, prompt classify-v1 and the codebook of the Agent READMEs
+  # paper (codebooks/seed_agent_readmes.yaml), through the Message Batches API (see classify.json
+  # in DATA_DIR/rq1/<gold>/classify/ for the run that was actually executed). The values below
+  # reproduce that run with `agm rq1 classify --kind INSTRUCTION --kind SKILL_MANIFEST`.
   #
-  # FINAL COLLECTION: set provider to anthropic and use the commented models (labels by Claude
-  # Opus 5.5, classification by Claude Sonnet 5.5), then redo the codebook with them. Cache keys
-  # and output folders include the provider and model, so test answers never mix with final ones.
-  provider: gemini
+  # TESTING PHASE (before the final collection): the pipeline ran on the free tier of the Gemini
+  # API (gemini-3.5-flash-lite); limits per minute and per day are in
+  # https://aistudio.google.com/rate-limit, and answers are cached, so a run stopped by the daily
+  # limit continues later. To test again with Gemini, pass `--model gemini:gemini-3.5-flash-lite`
+  # to the commands. Cache keys and output folders include the provider and model, so test
+  # answers never mix with final ones.
+  provider: anthropic
   gemini_requests_per_minute: 12   # free tier of gemini-3.5-flash-lite: 15/min, 500/day
-  propose_model: gemini-3.5-flash-lite            # claude-opus-5-5
+  propose_model: claude-opus-5-5
   propose_effort: high
-  consolidate_model: gemini-3.5-flash-lite        # claude-opus-5-5
+  consolidate_model: claude-opus-5-5
   consolidate_effort: high
-  classify_model: gemini-3.5-flash-lite           # claude-sonnet-5-5
+  classify_model: claude-sonnet-5-5
   classify_effort: low
-  codebook: codebooks/rq1.yaml   # curated codebook used by classify, saturation and validate
+  codebook: codebooks/seed_agent_readmes.yaml   # codebook used by classify, saturation and validate
   saturation_size: 100
   chunk_sections: 30
   validation_size: 300

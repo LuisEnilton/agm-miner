@@ -8,7 +8,15 @@ over raw text, so fenced code, HTML blocks and inline code are recognised correc
   level. Each section carries its heading path (ancestor headings), so H2/H3 titles can be used
   directly as input for content categorisation (Chatlatanagulchai et al.).
 * *Prose* is the text of paragraphs, headings, list items, tables and blockquotes, excluding code
-  and HTML; word counts and readability are computed on prose only.
+  and HTML; word counts and language detection use prose only.
+* *Readability text* is the prose of paragraphs and list items only (no headings or table cells),
+  one block per line, each block ending with ``.``, ``!`` or ``?`` (a final ``:``, ``;`` or ``,``
+  becomes a full stop). textstat only splits sentences on those three marks, so without this a
+  document made of bullet points would count as a single sentence. Blocks of one or two words
+  (labels, bare links) are left out: textstat does not count them as sentences but would still
+  count their words, inflating the words per sentence.
+* A UTF-8 byte order mark is ignored, bare URLs count as links (linkify) and task items
+  (``- [ ] ...``) are only counted in list items.
 """
 
 from __future__ import annotations
@@ -25,8 +33,16 @@ _FRONTMATTER_RE = re.compile(
     r"\A---[ \t]*\r?\n(?P<body>.*?)(?:\r?\n)?^(?:---|\.\.\.)[ \t]*$\r?\n?", re.S | re.M
 )
 _WORD_RE = re.compile(r"\w+(?:['’-]\w+)*")
+_TASK_RE = re.compile(r"^\[[ xX]\]\s")
+_SENTENCE_END = (".", "!", "?")
+_SOFT_END = ":;,"
+_MIN_SENTENCE_WORDS = 3  # textstat ignores shorter sentences when counting them
+_CLOSERS = ")]}\"'’”»*_"
+_BOM = "\ufeff"
 
-_PARSER = MarkdownIt("commonmark", {"html": True}).enable(["table", "strikethrough"])
+_PARSER = MarkdownIt("commonmark", {"html": True, "linkify": True}).enable(
+    ["table", "strikethrough", "linkify"]
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +81,7 @@ class ParsedDocument:
     sections: list[SectionRecord]
     counts: ElementCounts
     prose: str
+    readability_text: str
     line_count: int
 
     @property
@@ -114,6 +131,7 @@ def split_frontmatter(text: str) -> tuple[str | None, str, int]:
 
 
 def parse_document(text: str) -> ParsedDocument:
+    text = text.removeprefix(_BOM)
     frontmatter_source, body, offset = split_frontmatter(text)
     frontmatter: dict[str, Any] | None = None
     frontmatter_error: str | None = None
@@ -134,6 +152,7 @@ def parse_document(text: str) -> ParsedDocument:
     counts = ElementCounts()
     headings: list[Heading] = []
     prose_parts: list[str] = []
+    readable_parts: list[str] = []
 
     for index, token in enumerate(tokens):
         kind = token.type
@@ -145,7 +164,9 @@ def parse_document(text: str) -> ParsedDocument:
                 Heading(int(token.tag[1]), title, first_line + offset, after_line + offset)
             )
         elif kind == "paragraph_open":
-            counts.paragraphs += 1
+            # Items of a tight list wrap their text in hidden paragraphs: they are list items.
+            if not token.hidden:
+                counts.paragraphs += 1
         elif kind in ("fence", "code_block"):
             counts.code_blocks += 1
             language = token.info.strip().split(" ")[0].lower() if token.info else ""
@@ -167,10 +188,14 @@ def parse_document(text: str) -> ParsedDocument:
             counts.horizontal_rules += 1
         elif kind == "inline":
             text_content = _inline_text(token, counts)
-            if re.match(r"^\[[ xX]\]\s", token.content):
+            in_paragraph = index > 0 and tokens[index - 1].type == "paragraph_open"
+            in_list_item = in_paragraph and index > 1 and tokens[index - 2].type == "list_item_open"
+            if in_list_item and _TASK_RE.match(token.content):
                 counts.task_items += 1
             if text_content:
                 prose_parts.append(text_content)
+                if in_paragraph and count_words(text_content) >= _MIN_SENTENCE_WORDS:
+                    readable_parts.append(_as_sentence(text_content))
 
     lines = body.split("\n")
     sections = _sections(headings, lines, offset)
@@ -182,8 +207,17 @@ def parse_document(text: str) -> ParsedDocument:
         sections=sections,
         counts=counts,
         prose="\n".join(prose_parts),
+        readability_text="\n".join(readable_parts),
         line_count=text.count("\n") + (0 if text.endswith("\n") or not text else 1),
     )
+
+
+def _as_sentence(text: str) -> str:
+    """End a block with a full stop unless it already ends a sentence (also before a closing
+    quote or bracket, as in ``(see below.)``); a final ``:``, ``;`` or ``,`` is replaced."""
+    if text.rstrip(_CLOSERS).endswith(_SENTENCE_END):
+        return text
+    return f"{text.rstrip(_SOFT_END)}."
 
 
 def _inline_text(token: Token, counts: ElementCounts | None = None) -> str:

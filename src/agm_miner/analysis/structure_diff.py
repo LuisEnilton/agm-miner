@@ -4,6 +4,7 @@ fields (RQ3: "which parts are added and removed, and after which triggers")."""
 from __future__ import annotations
 
 import hashlib
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,25 +36,51 @@ def section_key(section: SectionRecord) -> str:
     return " > ".join(section.path) if section.path else "(preamble)"
 
 
-def _keyed_sections(document: ParsedDocument) -> dict[str, str]:
-    """Sections by heading path; repeated paths get an occurrence suffix (``#2``)."""
+@dataclass(frozen=True, slots=True)
+class DocumentOutline:
+    """What ``diff_documents`` compares, without the text: a digest of every section by its
+    key and the frontmatter. The analysis keeps one per blob for the whole RQ3 step, so it holds
+    no section text (``ParsedDocument`` holds the whole document several times)."""
+
+    sections: tuple[tuple[str, bytes], ...]
+    frontmatter: dict[str, Any]
+
+
+def _keyed_sections(document: ParsedDocument) -> tuple[tuple[str, bytes], ...]:
+    """Sections by heading path; repeated paths get an occurrence suffix (``#2``). Keys are
+    interned: the same headings repeat across thousands of files."""
     seen: Counter[str] = Counter()
-    result: dict[str, str] = {}
+    result: list[tuple[str, bytes]] = []
     for section in document.sections:
         key = section_key(section)
         seen[key] += 1
         if seen[key] > 1:
             key = f"{key} #{seen[key]}"
-        result[key] = hashlib.sha1(section.text.encode("utf-8")).hexdigest()
-    return result
+        digest = hashlib.blake2b(section.text.encode("utf-8"), digest_size=16).digest()
+        result.append((sys.intern(key), digest))
+    return tuple(result)
 
 
-def diff_documents(before: ParsedDocument | None, after: ParsedDocument | None) -> StructureDiff:
-    """Diff two parsed versions; ``None`` stands for "did not exist"."""
-    old_sections = _keyed_sections(before) if before else {}
-    new_sections = _keyed_sections(after) if after else {}
-    old_front: dict[str, Any] = (before.frontmatter or {}) if before else {}
-    new_front: dict[str, Any] = (after.frontmatter or {}) if after else {}
+def outline(document: ParsedDocument) -> DocumentOutline:
+    return DocumentOutline(_keyed_sections(document), document.frontmatter or {})
+
+
+def _as_outline(document: ParsedDocument | DocumentOutline | None) -> DocumentOutline | None:
+    if document is None or isinstance(document, DocumentOutline):
+        return document
+    return outline(document)
+
+
+def diff_documents(
+    before: ParsedDocument | DocumentOutline | None,
+    after: ParsedDocument | DocumentOutline | None,
+) -> StructureDiff:
+    """Diff two parsed versions (or their outlines); ``None`` stands for "did not exist"."""
+    old, new = _as_outline(before), _as_outline(after)
+    old_sections = dict(old.sections) if old else {}
+    new_sections = dict(new.sections) if new else {}
+    old_front: dict[str, Any] = old.frontmatter if old else {}
+    new_front: dict[str, Any] = new.frontmatter if new else {}
     return StructureDiff(
         sections_added=[key for key in new_sections if key not in old_sections],
         sections_removed=[key for key in old_sections if key not in new_sections],

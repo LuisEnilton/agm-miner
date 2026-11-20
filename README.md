@@ -1,9 +1,12 @@
 # agm-miner
 
-Ferramenta de mineração de repositórios do GitHub do estudo *Investigação Empírica de Artefatos de
-Configuração para Agentes de IA*. Ela coleta `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` e Skills
-do Claude (`.claude/skills/**`), com todo o histórico de cada arquivo, e gera datasets Parquet
-para as questões de pesquisa:
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24401086.svg)](https://doi.org/10.5281/zenodo.24401086)
+
+Ferramenta de mineração de repositórios do GitHub do estudo *O que os desenvolvedores dizem aos
+seus agentes de código? Um estudo empírico do conteúdo e da estrutura de `CLAUDE.md`, `AGENTS.md`
+e Skills*. Ela coleta `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` e Skills do Claude
+(`.claude/skills/**`), com todo o histórico de cada arquivo, e gera datasets Parquet para as
+questões de pesquisa:
 
 | Questão | O que a ferramenta produz |
 |---|---|
@@ -91,6 +94,8 @@ ou coletando de novo), está em [docs/replicacao.md](docs/replicacao.md).
 
 ## Licença e citação
 
-O código está sob a licença MIT ([LICENSE](LICENSE)). Para citar a ferramenta, use os metadados
-de [CITATION.cff](CITATION.cff) (o GitHub mostra a referência em "Cite this repository"). As
-mudanças de cada versão estão em [CHANGELOG.md](CHANGELOG.md).
+O código está sob a licença MIT ([LICENSE](LICENSE)). Cada versão é arquivada no Zenodo: o DOI
+[10.5281/zenodo.24401086](https://doi.org/10.5281/zenodo.24401086) aponta sempre para a mais
+recente, e a página do registro lista o DOI de cada versão. Para citar a ferramenta, use os
+metadados de [CITATION.cff](CITATION.cff) (o GitHub mostra a referência em "Cite this
+repository"). As mudanças de cada versão estão em [CHANGELOG.md](CHANGELOG.md).

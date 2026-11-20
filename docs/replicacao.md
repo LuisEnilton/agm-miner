@@ -40,6 +40,7 @@ lendo só arquivos (sem banco):
 ```bash
 # PACKAGE_SALT no .env: chave secreta de 16 caracteres ou mais (guarde-a; nunca a publique)
 poetry run agm package          # o export mais recente; --bronze DIR escolhe outro
+poetry run agm package --tool-doi 10.5281/zenodo.NNN   # cita o DOI da versão no README
 ```
 
 A saída fica em `DATA_DIR/package/<export>/` (gravada em `.partial` e renomeada no fim):

@@ -16,7 +16,12 @@ from agm_miner.analysis.datasets import build_datasets
 from agm_miner.config import AnalysisConfig, Settings, StudyConfig
 from agm_miner.database.models import DiscoveryHit, PipelineRun, Repository, RepositoryStatus
 from agm_miner.replication.anonymize import Pseudonymizer
-from agm_miner.replication.package import PackageInputError, PackageInputs, build_package
+from agm_miner.replication.package import (
+    PackageInputError,
+    PackageInputs,
+    ToolReference,
+    build_package,
+)
 from agm_miner.stages.export import export_bronze
 from agm_miner.stages.mining import MiningOptions, mine_repositories
 from agm_miner.stages.selection import MANUAL_QUERY
@@ -27,6 +32,7 @@ pytestmark = [pytest.mark.db, pytest.mark.git]
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = AnalysisConfig(min_artifact_bytes=0, min_human_contributors=1)
 SALT = b"a-test-salt-of-more-than-16-bytes"
+TOOL = ToolReference("1.0.1", "10.5281/zenodo.123")
 
 ANA = ("Ana Dev", "ana@example.org")
 BIA = ("Bia Souza", "12345+biasouza@users.noreply.github.com")
@@ -147,7 +153,7 @@ def _strings(directory: Path) -> str:
 def test_package_layout_checksums_and_excluded_files(data_dir: Path, tmp_path: Path) -> None:
     output = tmp_path / "package"
     p = Pseudonymizer(SALT, CONFIG)
-    summary = build_package(_inputs(data_dir, output), p, code_version="abc")
+    summary = build_package(_inputs(data_dir, output), p, code_version="abc", tool=TOOL)
     assert summary["output"] == str(output) and not output.with_name("package.partial").exists()
     export = next((data_dir / "bronze").iterdir()).name
     for name in (
@@ -201,14 +207,23 @@ def test_package_layout_checksums_and_excluded_files(data_dir: Path, tmp_path: P
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["code_version"] == "abc" and manifest["export"] == export
     assert "commits" in manifest["pseudonymised"]
+    assert manifest["tool"] == {
+        "repository": "https://github.com/LuisEnilton/agm-miner",
+        "version": "1.0.1",
+        "tag": "v1.0.1",
+        "doi": "10.5281/zenodo.123",
+    }
     readme = (output / "README.md").read_text()
     assert export in readme and f"dados/bronze-{export}.zip" in readme
+    assert "https://github.com/LuisEnilton/agm-miner/tree/v1.0.1" in readme
+    assert "https://doi.org/10.5281/zenodo.123" in readme
+    assert "Instale a ferramenta na v1.0.1" in readme and "@" + "TOOL" not in readme
     script = output / "reproduzir.sh"
     assert script.stat().st_mode & 0o111 and f"EXPORT={export}" in script.read_text()
     assert subprocess.run(["bash", "-n", str(script)], check=False).returncode == 0
 
     with pytest.raises(PackageInputError, match="already exists"):
-        build_package(_inputs(data_dir, output), p, code_version="abc")
+        build_package(_inputs(data_dir, output), p, code_version="abc", tool=TOOL)
 
 
 def test_package_has_no_personal_data_and_rebuilds_the_same_analysis(
@@ -216,7 +231,7 @@ def test_package_has_no_personal_data_and_rebuilds_the_same_analysis(
 ) -> None:
     p = Pseudonymizer(SALT, CONFIG)
     output = tmp_path / "package"
-    build_package(_inputs(data_dir, output), p, code_version="abc")
+    build_package(_inputs(data_dir, output), p, code_version="abc", tool=TOOL)
     extracted = _extract(output, tmp_path / "extracted")
     export = next((data_dir / "bronze").iterdir()).name
     bronze, gold = extracted / "bronze" / export, extracted / "gold" / export
@@ -254,3 +269,12 @@ def test_package_command_needs_a_salt(tmp_path: Path, monkeypatch) -> None:
     result = CliRunner().invoke(app, ["package", "--study", str(ROOT / "study.yaml")])
     get_settings.cache_clear()
     assert result.exit_code == 1 and "PACKAGE_SALT is not set" in result.output
+
+
+def test_tool_reference_without_doi() -> None:
+    from agm_miner.replication.package import _tool_line
+
+    line = _tool_line(
+        {"repository": "https://github.com/LuisEnilton/agm-miner", "tag": "v1.0.1", "doi": None}
+    )
+    assert line.startswith("`agm-miner` v1.0.1 (") and "doi.org" not in line

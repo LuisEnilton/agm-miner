@@ -3,7 +3,14 @@
 O formato segue o [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/), e as versões
 seguem o [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
-## [1.0.1] — versão do artigo
+## [1.0.2] — versão do artigo
+
+- `audit`: a ordem do funil de seleção é fixa nos empates (motivos com a mesma contagem saem pelo
+  nome), então uma reprodução gera o mesmo `audit.json`.
+- `reproduzir.sh` do pacote guarda também as tabelas publicadas da RQ1 em `publicado/` antes de
+  refazê-las.
+
+## [1.0.1] — 2026-11-20
 
 - `agm package` cita no README do pacote a versão da ferramenta que o reproduz (`--tool-version`,
   `--tool-doi`), com o título atual do estudo, e explica as versões de código registradas antes

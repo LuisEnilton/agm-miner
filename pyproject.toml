@@ -1,9 +1,11 @@
 [project]
 name = "agm-miner"
-version = "0.1.0"
+version = "1.0.0"
 description = "Mining pipeline for AI agent configuration artifacts (CLAUDE.md, AGENTS.md, Claude skills) on GitHub"
-authors = [{ name = "Luis Enilton" }]
+authors = [{ name = "Luis Enilton Luz Oliveira" }, { name = "Guilherme Avelino" }]
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11,<4.0"
 dependencies = [
 	"alembic (>=1.13.1,<2.0.0)",

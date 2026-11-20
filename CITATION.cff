@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "Se usar esta ferramenta, cite-a com os metadados abaixo."
+title: "agm-miner: mineração de arquivos de configuração de agentes de código no GitHub"
+type: software
+version: 1.0.0
+license: MIT
+repository-code: "https://github.com/LuisEnilton/agm-miner"
+authors:
+  - given-names: Luis Enilton
+    family-names: Luz Oliveira
+    affiliation: Universidade Federal do Piauí
+  - given-names: Guilherme
+    family-names: Avelino
+    affiliation: Universidade Federal do Piauí
+keywords:
+  - mining software repositories
+  - AI coding agents
+  - CLAUDE.md
+  - AGENTS.md
+  - Claude Code skills
+abstract: >-
+  Pipeline de mineração dos arquivos de configuração de agentes de código (CLAUDE.md,
+  AGENTS.md e skills do Claude Code) em repositórios do GitHub: descoberta pela Code Search,
+  seleção, mineração do histórico com git, exportação em Parquet, análise de conteúdo,
+  estrutura e evolução, e classificação do conteúdo com LLM.

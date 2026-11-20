@@ -1055,7 +1055,9 @@ def _label_prevalence(artifact_labels: pl.DataFrame, section_labels: pl.DataFram
             (pl.col("files") / pl.col("files_total")).alias("file_share"),
             (pl.col("sections") / pl.col("sections_total")).alias("section_share"),
         )
-        .sort("tool", "kind", "file_share", descending=[False, False, True])
+        # Ties broken by category: the order of group_by is not fixed, and a reproduction
+        # must give the same file byte for byte.
+        .sort("tool", "kind", "file_share", "category", descending=[False, False, True, False])
     )
 
 
@@ -1444,7 +1446,15 @@ def compare_models(
         )
         _write_parquet(prevalence, destination / "prevalence.parquet")
         result["all_sections"]["largest_file_share_differences"] = (
-            prevalence.sort(pl.col("file_share_diff").abs(), descending=True).head(10).to_dicts()
+            prevalence.sort(
+                pl.col("file_share_diff").abs(),
+                "tool",
+                "kind",
+                "category",
+                descending=[True, False, False, False],
+            )
+            .head(10)
+            .to_dicts()
         )
 
     if "validation" not in result and "all_sections" not in result:

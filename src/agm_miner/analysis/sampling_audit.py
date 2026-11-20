@@ -263,7 +263,13 @@ def selection_effects(repositories: pl.DataFrame, config: SelectionConfig) -> di
     funnel = (
         repositories.group_by("status", "rejection_reason")
         .len()
-        .sort(["status", "len"], descending=[False, True])
+        # Ties broken by reason: the order of group_by is not fixed, and a reproduction must
+        # give the same audit.json.
+        .sort(
+            ["status", "len", "rejection_reason"],
+            descending=[False, True, False],
+            nulls_last=True,
+        )
     )
     evaluated = repositories.filter(
         pl.col("metadata_fetched_at").is_not_null()

@@ -472,6 +472,15 @@ if [ "$LEVEL" = "L2" ]; then
   $AGM analyze --bronze "$DATA_DIR/bronze/$EXPORT"
 fi
 
+# As tabelas publicadas da RQ1 também ficam guardadas, porque o classify as refaz no lugar.
+for classified in "$DATA_DIR"/rq1/*/classify; do
+  [ -d "$classified" ] || continue
+  name=$(basename "$(dirname "$classified")")
+  rm -rf "$DATA_DIR/publicado/rq1/$name"
+  mkdir -p "$DATA_DIR/publicado/rq1/$name"
+  cp -r "$classified" "$DATA_DIR/publicado/rq1/$name/"
+done
+
 echo "== RQ1: classificação a partir das respostas guardadas (--offline)"
 $AGM rq1 classify --offline --gold "$DATA_DIR/gold/$EXPORT" \
   --kind INSTRUCTION --kind SKILL_MANIFEST
@@ -495,7 +504,8 @@ $AGM rq2 summary --gold "$DATA_DIR/gold/$EXPORT" --compare "$DATA_DIR/external/a
 $AGM audit --bronze "$DATA_DIR/bronze/$EXPORT"
 $AGM figures --gold "$DATA_DIR/gold/$EXPORT"
 
-echo "== Pronto. Compare $DATA_DIR/{audit,rq2,figures} com $DATA_DIR/publicado/"
+echo "== Pronto. Compare $DATA_DIR/{audit,rq2,figures} e as pastas classify/ de $DATA_DIR/rq1"
+echo "   com $DATA_DIR/publicado/ (fora dos caminhos e datas nos cabeçalhos, devem ser iguais)"
 """
 
 README_TEMPLATE = """# Pacote de replicação: artefatos de configuração de agentes de IA no GitHub

@@ -1,6 +1,6 @@
 [project]
 name = "agm-miner"
-version = "1.0.1"
+version = "1.0.2"
 description = "Mining pipeline for AI agent configuration artifacts (CLAUDE.md, AGENTS.md, Claude skills) on GitHub"
 authors = [{ name = "Luis Enilton Luz Oliveira" }, { name = "Guilherme Avelino" }]
 readme = "README.md"

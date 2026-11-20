@@ -531,3 +531,30 @@ def test_write_audit_refuses_to_replace_anything_but_an_audit(tmp_path: Path) ->
     refused = CliRunner().invoke(app, ["audit", "--bronze", str(bronze), "--output", str(data)])
     assert refused.exit_code == 1 and "choose another --output" in refused.output
     assert (data / "keep.txt").exists()
+
+
+def test_selection_funnel_order_is_fixed_on_ties() -> None:
+    """Reasons with the same count come out by name, whatever the input order."""
+    base = bronze_tables()["repositories"]
+    rejected = base.filter(pl.col("status") == "REJECTED").head(1)
+    reasons = ["mirror", "fork", "keyword:cheatsheet", "archived", "keyword:course"]
+    extra = pl.concat(
+        [
+            rejected.with_columns(
+                pl.lit(1000 + i).cast(base.schema["id"]).alias("id"),
+                pl.lit(reason).cast(base.schema["rejection_reason"]).alias("rejection_reason"),
+            )
+            for i, reason in enumerate(reasons)
+        ]
+    )
+    repositories = pl.concat([base, extra])
+    funnels = [
+        selection_effects(
+            repositories.sample(fraction=1.0, shuffle=True, seed=seed), STUDY.selection
+        )["funnel"]
+        for seed in range(20)
+    ]
+    assert all(funnel == funnels[0] for funnel in funnels)
+    ones = [row["reason"] for row in funnels[0] if row["status"] == "REJECTED"]
+    tied = [reason for reason in ones if reason in reasons]
+    assert tied == sorted(tied)

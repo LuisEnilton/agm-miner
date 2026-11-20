@@ -170,6 +170,14 @@ def package(
         Path | None,
         typer.Option(help="Output folder (default: DATA_DIR/package/<export>)."),
     ] = None,
+    tool_version: Annotated[
+        str | None,
+        typer.Option(help="Tool version that reproduces the package (default: this one)."),
+    ] = None,
+    tool_doi: Annotated[
+        str | None,
+        typer.Option(help="Zenodo DOI of that tool version, cited in the README."),
+    ] = None,
     study_path: StudyOption = None,
 ) -> None:
     """Replication package of an export for Zenodo: the bronze export and its analysis with the
@@ -177,7 +185,12 @@ def package(
     configuration, a data dictionary and reproduzir.sh (no database needed)."""
     from agm_miner.progress import Progress, publishing
     from agm_miner.replication.anonymize import Pseudonymizer
-    from agm_miner.replication.package import PackageInputError, PackageInputs, build_package
+    from agm_miner.replication.package import (
+        PackageInputError,
+        PackageInputs,
+        ToolReference,
+        build_package,
+    )
     from agm_miner.runs import code_version
     from agm_miner.stages.export import latest_export
 
@@ -202,6 +215,16 @@ def package(
     )
     with publishing(Progress("PACKAGE")) as progress, _showing_progress():
         result = build_package(
-            inputs, pseudonymizer, code_version=code_version(), progress=progress
+            inputs,
+            pseudonymizer,
+            code_version=code_version(),
+            tool=ToolReference(tool_version or _package_version(), tool_doi),
+            progress=progress,
         )
     _print(result)
+
+
+def _package_version() -> str:
+    from importlib.metadata import version
+
+    return version("agm-miner")

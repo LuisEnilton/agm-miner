@@ -53,6 +53,7 @@ _SKIPPED_SUFFIXES = (".lock", ".tmp")
 # Main result files copied unzipped too, so they can be read on Zenodo without downloading.
 _BROWSABLE = ("audit.md", "audit.tex", "audit_rascunho.tex", "rq2_summary.md", "figuras.tex")
 
+TOOL_REPOSITORY = "https://github.com/LuisEnilton/agm-miner"
 AGENT_READMES = "agentreadmes"
 # Sources of the external validation, pinned to the revisions used (docs/rq1.md).
 AGENT_READMES_SOURCES = {
@@ -74,6 +75,18 @@ AGENT_READMES_SOURCES = {
         "gpt_5_file_classifications.csv",
     ),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolReference:
+    """The released version of the tool that reproduces the package (cited in its README)."""
+
+    version: str
+    doi: str | None = None
+
+    @property
+    def tag(self) -> str:
+        return f"v{self.version}"
 
 
 class PackageInputError(RuntimeError):
@@ -117,6 +130,7 @@ def build_package(
     pseudonymizer: Pseudonymizer,
     *,
     code_version: str,
+    tool: ToolReference,
     progress: Progress | None = None,
 ) -> dict[str, Any]:
     """Write the replication package of ``inputs`` and return its summary."""
@@ -156,7 +170,7 @@ def build_package(
         script = partial / "reproduzir.sh"
         script.write_text(REPRODUCE_SCRIPT.replace("@EXPORT@", inputs.name), encoding="utf-8")
         script.chmod(0o755)
-        manifest = _manifest(inputs, bronze, gold, licences, code_version)
+        manifest = _manifest(inputs, bronze, gold, licences, code_version, tool)
         _write_json(partial / "manifest.json", manifest)
         (partial / "README.md").write_text(_readme(inputs, manifest, partial), encoding="utf-8")
         sums = _write_checksums(partial)
@@ -294,12 +308,19 @@ def _manifest(
     gold_rows: dict[str, int],
     licences: int,
     code_version: str,
+    tool: ToolReference,
 ) -> dict[str, Any]:
     bronze = json.loads((inputs.bronze_dir / "manifest.json").read_text(encoding="utf-8"))
     gold = json.loads((inputs.gold_dir / "analysis_manifest.json").read_text(encoding="utf-8"))
     return {
         "created_at": datetime.now(UTC).isoformat(),
         "code_version": code_version,
+        "tool": {
+            "repository": TOOL_REPOSITORY,
+            "version": tool.version,
+            "tag": tool.tag,
+            "doi": tool.doi,
+        },
         "export": inputs.name,
         "bronze": {
             key: bronze.get(key)
@@ -370,6 +391,8 @@ def _readme(inputs: PackageInputs, manifest: dict[str, Any], root: Path) -> str:
     sample = manifest["analysis"].get("sample") or {}
     replacements: dict[str, Callable[[], str]] = {
         "@EXPORT@": lambda: inputs.name,
+        "@TOOL@": lambda: _tool_line(manifest["tool"]),
+        "@TOOL_TAG@": lambda: str(manifest["tool"]["tag"]),
         "@CODE_VERSION@": lambda: str(manifest["code_version"]),
         "@BRONZE_CODE_VERSION@": lambda: str(manifest["bronze"].get("code_version")),
         "@ANALYSIS_CODE_VERSION@": lambda: str(manifest["analysis"].get("code_version")),
@@ -385,6 +408,13 @@ def _readme(inputs: PackageInputs, manifest: dict[str, Any], root: Path) -> str:
     for marker, value in replacements.items():
         text = text.replace(marker, value())
     return text
+
+
+def _tool_line(tool: dict[str, Any]) -> str:
+    """The tool version to install, with its DOI when known."""
+    url = f"{tool['repository']}/tree/{tool['tag']}"
+    doi = f", DOI [{tool['doi']}](https://doi.org/{tool['doi']})" if tool.get("doi") else ""
+    return f"`agm-miner` {tool['tag']} ([{url}]({url}){doi})"
 
 
 LICENSE_DATA = """# Licença dos dados
@@ -470,9 +500,11 @@ echo "== Pronto. Compare $DATA_DIR/{audit,rq2,figures} com $DATA_DIR/publicado/"
 
 README_TEMPLATE = """# Pacote de replicação: artefatos de configuração de agentes de IA no GitHub
 
-Dados, resultados e configuração do estudo *Investigação Empírica de Artefatos de Configuração
-para Agentes de IA* (`CLAUDE.md`, `AGENTS.md` e Skills do Claude), gerados pela ferramenta
-`agm-miner` a partir do export `@EXPORT@`.
+Dados, resultados e configuração do estudo *O que os desenvolvedores dizem aos seus agentes de
+código? Um estudo empírico do conteúdo e da estrutura de `CLAUDE.md`, `AGENTS.md` e Skills*,
+gerados pela ferramenta `agm-miner` a partir do export `@EXPORT@`.
+
+**Ferramenta para reproduzir:** @TOOL@.
 
 ## Proveniência
 
@@ -485,6 +517,14 @@ para Agentes de IA* (`CLAUDE.md`, `AGENTS.md` e Skills do Claude), gerados pela 
 
 Cada pasta tem um manifesto (`manifest.json`, `analysis_manifest.json`, `classify.json`, ...) com
 a versão do código e a configuração usadas. `manifest.json`, na raiz, resume tudo.
+
+As versões de código acima que não são da @TOOL_TAG@ são commits do repositório de
+desenvolvimento, anterior à publicação da ferramenta (o histórico publicado foi reescrito para
+tirar arquivos de terceiros). A @TOOL_TAG@ reproduz os dois níveis: a partir do export bronze,
+`agm analyze` refaz todas as tabelas da análise; a partir delas, os comandos abaixo refazem os
+resultados do artigo. Depois do export, só a seção `rq1` do `study.yaml` mudou: ela passou a
+registrar o provedor, os modelos e o codebook da coleta final da RQ1. Por isso `agm audit` avisa
+que a configuração difere da guardada no export; os números da auditoria não mudam.
 
 ## Conteúdo
 
@@ -507,7 +547,7 @@ um `DATA_DIR` que os comandos leem diretamente.
 
 ## Como reproduzir
 
-Instale a ferramenta na versão citada abaixo (veja a documentação dela) e rode:
+Instale a ferramenta na @TOOL_TAG@ (veja a documentação dela) e rode:
 
 ```bash
 sha256sum -c SHA256SUMS          # confere os arquivos
@@ -554,6 +594,6 @@ o dataset não declara licença: o `reproduzir.sh` os baixa das revisões fixada
 
 ## Como citar
 
-Cite o artigo e este pacote pelo DOI do registro no Zenodo, e a ferramenta pelo DOI da versão
-usada.
+Cite o artigo e este pacote pelo DOI do registro no Zenodo, e a ferramenta pela versão usada:
+@TOOL@.
 """

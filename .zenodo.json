@@ -1,0 +1,18 @@
+{
+  "title": "agm-miner: mineração de arquivos de configuração de agentes de código no GitHub",
+  "upload_type": "software",
+  "description": "<p>Pipeline de mineração dos arquivos de configuração de agentes de código (<code>CLAUDE.md</code>, <code>AGENTS.md</code> e <em>skills</em> do Claude Code) em repositórios do GitHub: descoberta pela Code Search, seleção, mineração do histórico com git, exportação em Parquet, análise de conteúdo, estrutura e evolução, e classificação do conteúdo com LLM. Ferramenta do estudo <em>O que os desenvolvedores dizem aos seus agentes de código?</em> (TCC, Universidade Federal do Piauí).</p>",
+  "creators": [
+    {"name": "Luz Oliveira, Luis Enilton", "affiliation": "Universidade Federal do Piauí"},
+    {"name": "Avelino, Guilherme", "affiliation": "Universidade Federal do Piauí"}
+  ],
+  "license": "MIT",
+  "language": "por",
+  "keywords": [
+    "mining software repositories",
+    "AI coding agents",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "Claude Code skills"
+  ]
+}

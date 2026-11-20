@@ -88,3 +88,9 @@ ou coletando de novo), está em [docs/replicacao.md](docs/replicacao.md).
 | [docs/replicacao.md](docs/replicacao.md) | Como reproduzir os resultados |
 | [docs/limitacoes.md](docs/limitacoes.md) | Ameaças à validade |
 | [AGENTS.md](AGENTS.md) | Arquitetura, princípios de projeto e guia para desenvolver (inclusive com agentes de código) |
+
+## Licença e citação
+
+O código está sob a licença MIT ([LICENSE](LICENSE)). Para citar a ferramenta, use os metadados
+de [CITATION.cff](CITATION.cff) (o GitHub mostra a referência em "Cite this repository"). As
+mudanças de cada versão estão em [CHANGELOG.md](CHANGELOG.md).

@@ -511,3 +511,36 @@ def test_offline_classify_reproduces_a_run_with_failed_requests(
     assert pl.read_parquet(labels).equals(expected)
     assert (output / "failures.json").read_text() == failures
     assert sorted((output / "cache").rglob("*.json")) == cached
+
+
+def test_label_prevalence_order_is_fixed_on_ties() -> None:
+    """Categories with the same share come out by name, whatever the input order."""
+    from agm_miner.rq1.stages import _label_prevalence
+
+    categories = ["testing", "docs", "security", "build", "style", "architecture"]
+    artifact_labels = pl.DataFrame(
+        {
+            "tool": ["CLAUDE"] * 12,
+            "kind": ["INSTRUCTION"] * 12,
+            "artifact_id": [1, 2] * 6,
+            "category": [c for c in categories for _ in range(2)],
+            "sections": [1] * 12,
+        }
+    )
+    section_labels = pl.DataFrame(
+        {
+            "tool": ["CLAUDE"] * 2,
+            "kind": ["INSTRUCTION"] * 2,
+            "artifact_id": [1, 2],
+            "section_key": ["a", "b"],
+            "position": [0, 0],
+        }
+    )
+    results = [
+        _label_prevalence(
+            artifact_labels.sample(fraction=1.0, shuffle=True, seed=seed), section_labels
+        )
+        for seed in range(20)
+    ]
+    assert results[0]["category"].to_list() == sorted(categories)
+    assert all(result.equals(results[0]) for result in results)
